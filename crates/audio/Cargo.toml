@@ -1,0 +1,16 @@
+[package]
+name = "tokativ-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cpal.workspace = true
+log.workspace = true
+rtrb.workspace = true
+rubato.workspace = true
+rustfft.workspace = true
+ndarray.workspace = true
+ort.workspace = true
+hound.workspace = true
