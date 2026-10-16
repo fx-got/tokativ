@@ -3,11 +3,13 @@
 
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, Global, SharedString, Size, Window, WindowHandle, div, px,
+    AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Window,
+    WindowHandle, div, px,
 };
-use tokativ_config::{Backend, Config, EngineKind, LanguageMode, PillEdge};
+use tokativ_config::{Backend, Config, Model, PillEdge};
 use ui::{
-    ActiveTheme as _, Button, MenuItem, Picker, Popovers, Scrubber, ScrubberState, Switch, Text,
+    ActiveTheme as _, Button, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller, Scrubber,
+    ScrubberState, Switch, Text,
 };
 
 use crate::chrome::{self, group, meter, row};
@@ -70,10 +72,12 @@ pub struct Settings {
     threshold: Slider,
     margin: Slider,
     devices: Vec<tokativ_audio::InputDevice>,
+    scrollbar: Entity<Scrollbar>,
 }
 
 impl Settings {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let view = cx.entity_id();
         let host = Host::global(cx);
         cx.observe(&host.store, |_, _, cx| cx.notify()).detach();
         cx.observe(&host.library, |_, _, cx| cx.notify()).detach();
@@ -92,6 +96,7 @@ impl Settings {
             threshold: Slider::new("threshold"),
             margin: Slider::new("margin"),
             devices: tokativ_audio::input_devices(),
+            scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
         }
     }
 
@@ -100,17 +105,6 @@ impl Settings {
     }
 
     fn dictation(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = config.language;
-        let language_picker = Picker::new("language", &self.popovers, language.name())
-            .width(Picker::NARROW)
-            .items(LanguageMode::ALL.into_iter().map(|mode| {
-                MenuItem::new(SharedString::from(mode.id()), mode.name())
-                    .selected(mode == language)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.language = mode);
-                    }))
-            }));
-
         let device = config.input_device.clone();
         let device_name = device
             .as_ref()
@@ -149,39 +143,6 @@ impl Settings {
             "Dictation",
             vec![
                 row(
-                    "Language mode",
-                "The mode a session starts in. The hotkey and tray can switch it.",
-                language_picker.into_any_element(),
-                cx,
-                )
-                .into_any_element(),
-                row(
-                    "Engine for Auto",
-                "Parakeet detects English, Russian and 23 more languages.",
-                self.engine_picker(
-                    "engine-auto",
-                    config.engines.auto,
-                    |config, kind| config.engines.auto = kind,
-                    cx,
-                )
-                .into_any_element(),
-                cx,
-                )
-                .into_any_element(),
-                row(
-                    "Engine for Russian",
-                "GigaAM is trained on Russian only and punctuates it well.",
-                self.engine_picker(
-                    "engine-russian",
-                    config.engines.russian,
-                    |config, kind| config.engines.russian = kind,
-                    cx,
-                )
-                .into_any_element(),
-                cx,
-                )
-                .into_any_element(),
-                row(
                     "Live text",
                     "Show a draft of each phrase at the cursor while you speak. Needs the input method.",
                     live_switch,
@@ -198,27 +159,6 @@ impl Settings {
             ],
             cx,
         )
-    }
-
-    fn engine_picker(
-        &self,
-        key: &'static str,
-        current: EngineKind,
-        set: fn(&mut Config, EngineKind),
-        cx: &mut Context<Self>,
-    ) -> Picker {
-        Picker::new(key, &self.popovers, current.name())
-            .width(Picker::REGULAR)
-            .items(EngineKind::ALL.into_iter().map(move |kind| {
-                MenuItem::new(
-                    SharedString::from(format!("{key}-{}", kind.id())),
-                    kind.name(),
-                )
-                .selected(kind == current)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| set(config, kind));
-                }))
-            }))
     }
 
     fn detection(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
@@ -448,54 +388,43 @@ impl Settings {
         )
     }
 
-    fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The models to choose from. Clicking a downloaded one makes it the one sessions use.
+    fn models(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
         let library = self.library.read(cx);
-        let rows: Vec<_> = EngineKind::ALL
+        let rows: Vec<_> = Model::ALL
             .into_iter()
-            .map(|kind| (kind, library.state(kind)))
+            .map(|model| (model, library.state(model)))
             .collect();
+        let chosen = config.model;
         group(
-            "Models",
+            "Model",
             rows.into_iter()
-                .map(|(kind, state)| model_row(kind, state, &self.library, cx).into_any_element())
+                .map(|(model, state)| {
+                    let installed = matches!(state, ModelState::Installed { .. });
+                    let radio = Radio::new(
+                        SharedString::from(format!("use-{}", model.id())),
+                        model == chosen,
+                    )
+                    .into_any_element();
+                    div()
+                        .id(SharedString::from(format!("model-{}", model.id())))
+                        .when(installed, |this| {
+                            this.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.edit(cx, |config| config.model = model);
+                                }))
+                        })
+                        .child(model_row(model, state, &self.library, Some(radio), cx))
+                        .into_any_element()
+                })
                 .collect(),
             cx,
         )
     }
 
-    fn hotkey(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let copy = Button::new("copy-bind")
-            .label("Copy")
-            .icon("icons/copy.svg")
-            .small()
-            .outline()
-            .on_click(|_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(NIRI_BIND.to_owned()))
-            });
-        group(
-            "Hotkey",
-            vec![
-                row(
-                    "niri keybind",
-                    "Press once to start and again to insert the rest. While the pill is up, Escape cancels and Enter inserts.",
-                    copy.into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
-                chrome::code(NIRI_BIND, cx).into_any_element(),
-            ],
-            cx,
-        )
-    }
-
-    /// The window's opening: what the app is and whether it is listening right now.
+    /// The window's opening: the app's mark and name.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let status = self.status.read(cx);
-        let (label, dot) = match status.recording {
-            true => ("Listening", theme.danger),
-            false => ("Ready", theme.progress_bar),
-        };
         let mark = theme.metrics.control * 1.4;
         div()
             .flex()
@@ -521,56 +450,26 @@ impl Settings {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(theme.text(Text::Large))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Tokativ"),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.text(Text::Small))
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "{} mode, inserting with {}",
-                                status.mode.name(),
-                                status.method.to_lowercase()
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_1()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(theme.text(Text::Small))
-                    .child(div().size(px(7.)).rounded_full().bg(dot))
-                    .child(label),
+                    .text_size(theme.text(Text::Large))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Tokativ"),
             )
     }
 }
 
-/// One model's row: its name, where it stands, and the button that changes that.
+/// One model's row: its name and maker, what it is good at, where it stands on disk, and the
+/// button that changes that. `leading` goes in front, a radio or a checkbox.
 pub(crate) fn model_row(
-    kind: EngineKind,
+    model: Model,
     state: ModelState,
     library: &Entity<Library>,
+    leading: Option<AnyElement>,
     cx: &App,
 ) -> impl IntoElement {
-    let download = tokativ_engine::models::download_size(kind);
-    let (detail, progress) = match &state {
-        ModelState::Missing => (format!("Not downloaded, {}", chrome::size(download)), None),
+    let theme = cx.theme();
+    let download = tokativ_engine::models::download_size(model);
+    let (status, progress) = match &state {
+        ModelState::Missing => (format!("{} download", chrome::size(download)), None),
         ModelState::Downloading { done, total } => {
             let total = (*total).max(1);
             (
@@ -582,12 +481,10 @@ pub(crate) fn model_row(
                 Some(*done as f32 / total as f32),
             )
         }
-        ModelState::Installed { bytes } => {
-            (format!("Installed, {} on disk", chrome::size(*bytes)), None)
-        }
+        ModelState::Installed { bytes } => (format!("{} on disk", chrome::size(*bytes)), None),
         ModelState::Failed(error) => (format!("Download failed: {error}"), None),
     };
-    let id = kind.id();
+    let id = model.id();
     let action = {
         let library = library.clone();
         match state {
@@ -596,14 +493,16 @@ pub(crate) fn model_row(
                     .label("Cancel")
                     .small()
                     .outline()
-                    .on_click(move |_, _, cx| library.update(cx, |library, _| library.cancel(kind)))
+                    .on_click(move |_, _, cx| {
+                        library.update(cx, |library, _| library.cancel(model))
+                    })
             }
             ModelState::Installed { .. } => Button::new(SharedString::from(format!("delete-{id}")))
                 .label("Delete")
                 .small()
                 .outline()
                 .on_click(move |_, _, cx| {
-                    library.update(cx, |library, cx| library.delete(kind, cx))
+                    library.update(cx, |library, cx| library.delete(model, cx))
                 }),
             ModelState::Missing | ModelState::Failed(_) => {
                 Button::new(SharedString::from(format!("download-{id}")))
@@ -611,48 +510,96 @@ pub(crate) fn model_row(
                     .small()
                     .primary()
                     .on_click(move |_, _, cx| {
-                        library.update(cx, |library, cx| library.download(kind, cx))
+                        library.update(cx, |library, cx| library.download(model, cx))
                     })
             }
         }
     };
+    let small = theme.text(Text::Small);
     div()
-        .child(row(kind.name(), detail, action.into_any_element(), cx))
-        .when_some(progress, |this, progress| {
-            this.child(
-                div()
-                    .pb_3()
-                    .px(chrome::GROUP_PADDING)
-                    .child(meter(progress, px(8.), cx)),
-            )
+        .flex()
+        .items_start()
+        .gap_3()
+        .px(chrome::GROUP_PADDING)
+        .py_3()
+        .when_some(leading, |this, leading| {
+            this.child(div().flex_none().pt(px(2.)).child(leading))
         })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(model.name())
+                        .child(
+                            div()
+                                .text_size(small)
+                                .text_color(theme.muted_foreground)
+                                .child(model.maker()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(small)
+                        .text_color(theme.muted_foreground)
+                        .child(model.summary()),
+                )
+                .child(match progress {
+                    Some(progress) => div()
+                        .pt_1()
+                        .child(meter(progress, px(6.), cx))
+                        .into_any_element(),
+                    None => div()
+                        .text_size(small)
+                        .text_color(theme.muted_foreground.opacity(0.75))
+                        .child(status.clone())
+                        .into_any_element(),
+                })
+                .when(progress.is_some(), |this| {
+                    this.child(
+                        div()
+                            .text_size(small)
+                            .text_color(theme.muted_foreground)
+                            .child(status),
+                    )
+                }),
+        )
+        .child(div().flex_none().child(action))
 }
 
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let config = self.store.read(cx).config().clone();
         let content = div()
-            .id("settings")
+            .flex()
+            .flex_col()
             .size_full()
-            .overflow_y_scroll()
             .child(
-                div()
-                    .w_full()
-                    .max_w(px(WIDTH))
-                    .mx_auto()
-                    .px_6()
-                    .pb_6()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(self.header(cx))
-                    .child(self.dictation(&config, cx))
-                    .child(self.detection(&config, cx))
-                    .child(self.insertion(&config, cx))
-                    .child(self.pill(&config, cx))
-                    .child(self.system(&config, cx))
-                    .child(self.models(cx))
-                    .child(self.hotkey(cx)),
+                Scroller::new("settings", &self.scrollbar).child(
+                    div()
+                        .w_full()
+                        .max_w(px(WIDTH))
+                        .mx_auto()
+                        .px_6()
+                        .pb_6()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(self.header(cx))
+                        .child(self.models(&config, cx))
+                        .child(self.dictation(&config, cx))
+                        .child(self.detection(&config, cx))
+                        .child(self.insertion(&config, cx))
+                        .child(self.pill(&config, cx))
+                        .child(self.system(&config, cx)),
+                ),
             )
             .into_any_element();
         chrome::frame("Settings", content, window, cx)
