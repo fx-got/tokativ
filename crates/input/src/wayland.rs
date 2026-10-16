@@ -2,7 +2,7 @@
 //! keyboard on behalf of [`crate::Inserter`].
 
 use std::io::{ErrorKind, Write as _};
-use std::os::fd::AsFd as _;
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,10 +11,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
-use wayland_client::protocol::wl_keyboard::KeymapFormat;
+use wayland_client::protocol::wl_keyboard::{KeyState, KeymapFormat};
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_seat::WlSeat;
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_keyboard_grab_v2::{
+    self, ZwpInputMethodKeyboardGrabV2,
+};
 use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
 use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_v2::{
     self, ZwpInputMethodV2,
@@ -23,10 +26,8 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboar
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
 
 use crate::keymap::{self, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V, MOD_CTRL, MOD_SHIFT};
-use crate::{Backend, Method, Request, Status, clipboard, focus};
+use crate::{Backend, Key, Method, Request, Status, clipboard, focus};
 
-/// What the placeholder preedit shows while a segment is transcribed.
-const PLACEHOLDER: &str = "…";
 /// The input method protocol rejects longer strings.
 const MAX_STRING: usize = 4000;
 /// How long the first insertion of a session waits for the focused field to activate the input
@@ -39,6 +40,15 @@ const KEYMAP_CHARS: usize = 64;
 /// How long the app gets to read the clipboard after the paste chord before it is restored.
 const PASTE_SETTLE: Duration = Duration::from_millis(400);
 const TICK: Duration = Duration::from_millis(10);
+/// Evdev codes the keyboard grab answers to.
+const KEY_ESC: u32 = 1;
+const KEY_ENTER: u32 = 28;
+const KEY_KPENTER: u32 = 96;
+/// Keys that only change modifiers. Pressing one leaves the grab alone, so the Super still held
+/// from the hotkey or a Shift on its own does not hand the keyboard back.
+const MODIFIER_KEYS: [u32; 9] = [29, 97, 42, 54, 56, 100, 125, 126, 58];
+/// Shift, Ctrl, Alt and Super in the masks a keymap built from `complete` uses.
+const SHORTCUT_MODS: u32 = 1 | 4 | 8 | 64;
 
 /// The protocol state the dispatch callbacks write into.
 struct State {
@@ -49,7 +59,16 @@ struct State {
     serial: u32,
     unavailable: bool,
     before: Arc<Mutex<Option<String>>>,
+    keys: KeyHandler,
+    /// The seat keymap the grab reported, to forward keys with.
+    keymap: Option<(OwnedFd, u32)>,
+    /// Depressed, latched and locked modifiers and the layout group, as the grab last saw them.
+    mods: [u32; 4],
+    /// A key pressed under the grab that belongs to the app, waiting for the worker to forward.
+    passthrough: Option<(u32, u32)>,
 }
+
+pub(crate) type KeyHandler = Box<dyn Fn(Key) + Send>;
 
 struct Worker {
     connection: Connection,
@@ -62,6 +81,7 @@ struct Worker {
     method: Method,
     terminals: Vec<String>,
     input_method: Option<ZwpInputMethodV2>,
+    grab: Option<ZwpInputMethodKeyboardGrabV2>,
     /// Whether this session already waited out [`ACTIVATION`] once.
     waited: bool,
     started: Instant,
@@ -73,8 +93,9 @@ pub(crate) fn run(
     requests: Receiver<Request>,
     ready: SyncSender<Result<Status>>,
     before: Arc<Mutex<Option<String>>>,
+    keys: KeyHandler,
 ) {
-    let mut worker = match Worker::connect(preferred, terminals, before) {
+    let mut worker = match Worker::connect(preferred, terminals, before, keys) {
         Ok((worker, status)) => {
             ready.send(Ok(status)).ok();
             worker
@@ -108,6 +129,7 @@ impl Worker {
         preferred: Backend,
         terminals: Vec<String>,
         before: Arc<Mutex<Option<String>>>,
+        keys: KeyHandler,
     ) -> Result<(Self, Status)> {
         let connection = Connection::connect_to_env().context("connecting to Wayland")?;
         let (globals, queue) =
@@ -134,6 +156,10 @@ impl Worker {
                 serial: 0,
                 unavailable: false,
                 before,
+                keys,
+                keymap: None,
+                mods: [0; 4],
+                passthrough: None,
             },
             seat,
             input_methods,
@@ -141,6 +167,7 @@ impl Worker {
             method: status.method,
             terminals,
             input_method: None,
+            grab: None,
             waited: false,
             started: Instant::now(),
         };
@@ -150,8 +177,9 @@ impl Worker {
     fn handle(&mut self, request: Request) -> Result<()> {
         match request {
             Request::Begin => self.begin(),
-            Request::Placeholder => self.placeholder(),
-            Request::Insert { text, more } => self.insert(&text, more),
+            Request::Preedit(text) => self.preedit(&text),
+            Request::Insert { text, preedit } => self.insert(&text, &preedit),
+            Request::Release => self.release(),
             Request::End => self.end(),
             Request::Terminals(terminals) => {
                 self.terminals = terminals;
@@ -173,7 +201,11 @@ impl Worker {
         self.state.active = false;
         self.state.serial = 0;
         self.state.unavailable = false;
-        self.input_method = Some(manager.get_input_method(&self.seat, &self.handle, ()));
+        let input_method = manager.get_input_method(&self.seat, &self.handle, ());
+        self.state.keymap = None;
+        self.state.passthrough = None;
+        self.grab = Some(input_method.grab_keyboard(&self.handle, ()));
+        self.input_method = Some(input_method);
         self.pump(Duration::ZERO)
     }
 
@@ -204,30 +236,33 @@ impl Worker {
             .flatten())
     }
 
-    fn placeholder(&mut self) -> Result<()> {
+    fn preedit(&mut self, text: &str) -> Result<()> {
         if !self.state.active {
             return Ok(());
         }
         if let Some(input_method) = &self.input_method {
-            input_method.set_preedit_string(PLACEHOLDER.into(), -1, -1);
+            let shown = chunks(text, MAX_STRING).next().unwrap_or_default();
+            input_method.set_preedit_string(shown.into(), -1, -1);
             input_method.commit(self.state.serial);
         }
         self.pump(Duration::ZERO)
     }
 
-    fn insert(&mut self, text: &str, more: bool) -> Result<()> {
+    fn insert(&mut self, text: &str, preedit: &str) -> Result<()> {
         if let Some(input_method) = self.active_input_method()? {
             log::debug!("insert: {} bytes through the input method", text.len());
             for chunk in chunks(text, MAX_STRING) {
                 input_method.commit_string(chunk.into());
             }
-            if more {
-                input_method.set_preedit_string(PLACEHOLDER.into(), -1, -1);
+            if let Some(preedit) = chunks(preedit, MAX_STRING).next() {
+                input_method.set_preedit_string(preedit.into(), -1, -1);
             }
             input_method.commit(self.state.serial);
             return self.pump(Duration::ZERO);
         }
         log::debug!("insert: {} bytes, no active input method", text.len());
+        // Virtual keys must not land in the grab, where they would come straight back.
+        self.release()?;
         match (self.method, self.keyboards.is_some()) {
             (Method::Clipboard, true) => self.paste(text),
             (_, true) => self.type_text(text),
@@ -240,6 +275,9 @@ impl Worker {
     }
 
     fn end(&mut self) -> Result<()> {
+        if let Some(grab) = self.grab.take() {
+            grab.release();
+        }
         let Some(input_method) = self.input_method.take() else {
             return Ok(());
         };
@@ -254,6 +292,36 @@ impl Worker {
             .roundtrip(&mut self.state)
             .context("ending the input method")?;
         Ok(())
+    }
+
+    /// Hands the keyboard back to the apps for the rest of the session.
+    fn release(&mut self) -> Result<()> {
+        if let Some(grab) = self.grab.take() {
+            grab.release();
+            self.pump(Duration::ZERO)?;
+        }
+        Ok(())
+    }
+
+    /// Sends a key pressed under the grab on to the focused app and releases the grab, so typing
+    /// by hand during a session behaves as if Tokativ were not there. The key's release then
+    /// reaches the app the usual way.
+    fn forward(&mut self, key: u32, time: u32) -> Result<()> {
+        let keymap = self
+            .state
+            .keymap
+            .as_ref()
+            .map(|(fd, size)| fd.try_clone().map(|fd| (fd, *size)))
+            .transpose()?;
+        if let (Some((fd, size)), Some(manager)) = (keymap, &self.keyboards) {
+            let keyboard = manager.create_virtual_keyboard(&self.seat, &self.handle, ());
+            keyboard.keymap(KeymapFormat::XkbV1.into(), fd.as_fd(), size);
+            let [depressed, latched, locked, group] = self.state.mods;
+            keyboard.modifiers(depressed, latched, locked, group);
+            keyboard.key(time, key, KeyState::Pressed.into());
+            keyboard.destroy();
+        }
+        self.release()
     }
 
     /// Types `text` through a fresh virtual keyboard whose keymap holds exactly the characters
@@ -379,6 +447,9 @@ impl Worker {
             }
         }
         self.queue.dispatch_pending(&mut self.state)?;
+        if let Some((key, time)) = self.state.passthrough.take() {
+            self.forward(key, time)?;
+        }
         Ok(())
     }
 }
@@ -474,6 +545,45 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
                 state.active = state.pending_active;
             }
             zwp_input_method_v2::Event::Unavailable => state.unavailable = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZwpInputMethodKeyboardGrabV2,
+        event: zwp_input_method_keyboard_grab_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_input_method_keyboard_grab_v2::Event::Keymap { fd, size, .. } => {
+                state.keymap = Some((fd, size));
+            }
+            zwp_input_method_keyboard_grab_v2::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => state.mods = [mods_depressed, mods_latched, mods_locked, group],
+            zwp_input_method_keyboard_grab_v2::Event::Key {
+                key,
+                state: WEnum::Value(KeyState::Pressed),
+                time,
+                ..
+            } => {
+                let plain = state.mods[0] & SHORTCUT_MODS == 0;
+                match key {
+                    KEY_ESC if plain => (state.keys)(Key::Escape),
+                    KEY_ENTER | KEY_KPENTER if plain => (state.keys)(Key::Enter),
+                    key if MODIFIER_KEYS.contains(&key) => {}
+                    key => state.passthrough = Some((key, time)),
+                }
+            }
             _ => {}
         }
     }

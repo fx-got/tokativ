@@ -41,10 +41,18 @@ pub struct Status {
     pub note: Option<String>,
 }
 
+/// A key the session answers to while it holds the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Escape,
+    Enter,
+}
+
 pub(crate) enum Request {
     Begin,
-    Placeholder,
-    Insert { text: String, more: bool },
+    Preedit(String),
+    Insert { text: String, preedit: String },
+    Release,
     End,
     Terminals(Vec<String>),
 }
@@ -59,15 +67,29 @@ pub struct Inserter {
 
 impl Inserter {
     /// Connects to the compositor, picks a method starting from `preferred`, and starts the
-    /// worker. `terminals` are the app ids that paste with Ctrl+Shift+V.
-    pub fn start(preferred: Backend, terminals: Vec<String>) -> Result<Self> {
+    /// worker. `terminals` are the app ids that paste with Ctrl+Shift+V. `keys` runs on the worker
+    /// thread when Escape or Enter is pressed during a session.
+    pub fn start(
+        preferred: Backend,
+        terminals: Vec<String>,
+        keys: impl Fn(Key) + Send + 'static,
+    ) -> Result<Self> {
         let (requests, receiver) = mpsc::channel();
         let (ready, probed) = mpsc::sync_channel(1);
         let before = Arc::new(Mutex::new(None));
         let shared = before.clone();
         thread::Builder::new()
             .name("insert".into())
-            .spawn(move || wayland::run(preferred, terminals, receiver, ready, shared))
+            .spawn(move || {
+                wayland::run(
+                    preferred,
+                    terminals,
+                    receiver,
+                    ready,
+                    shared,
+                    Box::new(keys),
+                )
+            })
             .context("spawning the insertion thread")?;
         let status = probed
             .recv()
@@ -93,22 +115,27 @@ impl Inserter {
     }
 
     /// Starts a dictation session. With the input method this binds it, so the focused text
-    /// field can activate it before the first segment is ready.
+    /// field can activate it before the first segment is ready, and takes the keyboard so Escape
+    /// and Enter reach the session. Any other key goes on to the app and hands the keyboard back.
     pub fn begin(&self) {
         *self.before.lock().expect("before lock") = None;
         self.send(Request::Begin);
     }
 
-    /// Shows a placeholder at the cursor while a segment is being transcribed. Only the input
+    /// Shows `text` at the cursor as unconfirmed text, or clears it when empty. Only the input
     /// method can do this. The other methods ignore it.
-    pub fn placeholder(&self) {
-        self.send(Request::Placeholder);
+    pub fn preedit(&self, text: String) {
+        self.send(Request::Preedit(text));
     }
 
-    /// Inserts `text` at the cursor. `more` keeps the placeholder up because another segment
-    /// is still being transcribed.
-    pub fn insert(&self, text: String, more: bool) {
-        self.send(Request::Insert { text, more });
+    /// Inserts `text` at the cursor and then shows `preedit` after it, which may be empty.
+    pub fn insert(&self, text: String, preedit: String) {
+        self.send(Request::Insert { text, preedit });
+    }
+
+    /// Hands the keyboard back to the apps while the session finishes.
+    pub fn release_keys(&self) {
+        self.send(Request::Release);
     }
 
     /// Ends the session and clears any placeholder.
