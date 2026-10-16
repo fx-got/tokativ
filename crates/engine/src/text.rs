@@ -31,6 +31,11 @@ impl Joiner {
         joiner
     }
 
+    /// What [`Joiner::join`] would give for `raw`, without moving past it. For showing a draft.
+    pub fn preview(&self, raw: &str) -> Option<String> {
+        self.clone().join(raw)
+    }
+
     /// The text to insert for one segment, or `None` when it transcribed to nothing.
     pub fn join(&mut self, raw: &str) -> Option<String> {
         let text = raw.split_whitespace().collect::<Vec<_>>().join(" ");

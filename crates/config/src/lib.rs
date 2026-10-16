@@ -140,6 +140,9 @@ pub struct Config {
     pub models: Models,
     pub launch_at_login: bool,
     pub tray: bool,
+    /// Show a draft of the phrase being spoken at the cursor before it is final. Needs the input
+    /// method.
+    pub live_preview: bool,
 }
 
 impl Default for Config {
@@ -154,6 +157,7 @@ impl Default for Config {
             models: Models::default(),
             launch_at_login: false,
             tray: true,
+            live_preview: true,
         }
     }
 }

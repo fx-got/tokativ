@@ -127,7 +127,15 @@ impl Setup {
             max_segment_s: 20,
             preroll_ms: 200,
         };
-        match Recorder::start(tokativ_audio::Options { device, timing }, None, |_| {}) {
+        match Recorder::start(
+            tokativ_audio::Options {
+                device,
+                timing,
+                progress: None,
+            },
+            None,
+            |_| {},
+        ) {
             Ok(recorder) => self.monitor = Some(recorder),
             Err(error) => log::error!("setup: cannot open the microphone: {error:#}"),
         }

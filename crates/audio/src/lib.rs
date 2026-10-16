@@ -45,6 +45,9 @@ pub enum Event {
     /// Speech began after a pause.
     Started,
     Segment(Segment),
+    /// The whole of the segment still being spoken so far, for a draft transcript. Sent at most
+    /// once per [`Options::progress`] of new audio.
+    Progress(Vec<f32>),
     /// The device failed mid-recording. No further events follow.
     Failed(String),
     /// The recording has ended and every segment it produced has been delivered.
@@ -55,6 +58,8 @@ pub struct Options {
     /// The CPAL device id, or `None` for the default input.
     pub device: Option<String>,
     pub timing: Timing,
+    /// How much new speech triggers an [`Event::Progress`]. `None` sends none.
+    pub progress: Option<Duration>,
 }
 
 enum Control {
@@ -168,6 +173,10 @@ fn record(
     let mut segmenter = Segmenter::new(options.timing);
     let mut input = Vec::new();
     let mut resampled = Vec::new();
+    let progress = options
+        .progress
+        .map(|interval| (interval.as_secs_f32() * RATE as f32) as usize);
+    let mut reported = 0;
     let mut judge = |resampled: &mut Vec<f32>, events: &mut dyn FnMut(Event)| {
         let Some(detector) = detector.as_mut() else {
             resampled.clear();
@@ -178,10 +187,19 @@ fn record(
             match segmenter.push(frame, detector.probability(frame)) {
                 Cut::None => {}
                 Cut::Started => events(Event::Started),
-                Cut::Segment(segment) => events(Event::Segment(segment)),
+                Cut::Segment(segment) => {
+                    reported = 0;
+                    events(Event::Segment(segment));
+                }
             }
         }
         resampled.drain(..whole);
+        if let (Some(interval), Some(current)) = (progress, segmenter.in_progress())
+            && current.len() >= reported + interval
+        {
+            reported = current.len();
+            events(Event::Progress(current.to_vec()));
+        }
     };
 
     let stopped = loop {

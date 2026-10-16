@@ -110,6 +110,13 @@ impl Segmenter {
         }
     }
 
+    /// The audio of the segment still being spoken, once it holds enough speech to be worth a
+    /// draft transcript.
+    pub fn in_progress(&self) -> Option<&[f32]> {
+        (self.speaking && self.speech_frames as usize >= frames(MIN_SPEECH_MS))
+            .then_some(&self.current)
+    }
+
     /// Ends the segment in progress, if it holds enough speech to transcribe.
     pub fn flush(&mut self) -> Option<Segment> {
         self.speaking.then(|| self.close(false)).flatten()

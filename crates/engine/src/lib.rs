@@ -7,8 +7,8 @@ mod text;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::Path;
-use std::sync::Once;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -112,6 +112,8 @@ enum Job {
         samples: Vec<f32>,
         reply: Reply,
     },
+    /// Wakes the worker to take whatever draft sits in the shared slot.
+    Draft,
     /// Drop models after this long without a job. `None` keeps them.
     IdleLimit(Option<Duration>),
 }
@@ -122,16 +124,27 @@ enum Job {
 #[derive(Clone)]
 pub struct Transcriber {
     jobs: Sender<Job>,
+    draft: Arc<Mutex<Option<Draft>>>,
+}
+
+/// A transcription whose result is only shown, never kept. Only the newest one waits, so drafts
+/// never pile up behind a slow model.
+struct Draft {
+    kind: EngineKind,
+    samples: Vec<f32>,
+    reply: Reply,
 }
 
 impl Transcriber {
     pub fn start(idle: Option<Duration>) -> Result<Self> {
         let (jobs, receiver) = mpsc::channel();
+        let draft = Arc::new(Mutex::new(None));
+        let drafts = draft.clone();
         thread::Builder::new()
             .name("transcribe".into())
-            .spawn(move || work(receiver, idle))
+            .spawn(move || work(receiver, drafts, idle))
             .context("spawning the transcription thread")?;
-        Ok(Self { jobs })
+        Ok(Self { jobs, draft })
     }
 
     /// Loads `kind` ahead of the first segment, so the first result is not held up by it.
@@ -156,12 +169,29 @@ impl Transcriber {
         }
     }
 
+    /// Transcribes `samples` as a draft for live preview. It runs after the segments already
+    /// queued, and a newer draft replaces this one if it has not started yet, in which case
+    /// `reply` never runs.
+    pub fn draft(
+        &self,
+        kind: EngineKind,
+        samples: Vec<f32>,
+        reply: impl FnOnce(Result<String>) + Send + 'static,
+    ) {
+        *self.draft.lock().expect("draft lock") = Some(Draft {
+            kind,
+            samples,
+            reply: Box::new(reply),
+        });
+        self.jobs.send(Job::Draft).ok();
+    }
+
     pub fn set_idle_limit(&self, idle: Option<Duration>) {
         self.jobs.send(Job::IdleLimit(idle)).ok();
     }
 }
 
-fn work(jobs: Receiver<Job>, mut idle: Option<Duration>) {
+fn work(jobs: Receiver<Job>, drafts: Arc<Mutex<Option<Draft>>>, mut idle: Option<Duration>) {
     let mut loaded: HashMap<EngineKind, Box<dyn Engine>> = HashMap::new();
     let mut last = Instant::now();
     loop {
@@ -200,6 +230,14 @@ fn work(jobs: Receiver<Job>, mut idle: Option<Duration>) {
                     started.elapsed()
                 );
                 reply(result);
+            }
+            Job::Draft => {
+                let Some(draft) = drafts.lock().expect("draft lock").take() else {
+                    continue;
+                };
+                let result = engine(&mut loaded, draft.kind)
+                    .and_then(|engine| engine.transcribe(&draft.samples));
+                (draft.reply)(result);
             }
             Job::IdleLimit(limit) => idle = limit,
         }

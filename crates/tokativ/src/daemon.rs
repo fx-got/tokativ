@@ -11,13 +11,18 @@ use notify::{RecursiveMode, Watcher as _};
 use tokativ_audio::{Options, Recorder, Silero, SpeechDetector, Timing};
 use tokativ_config::{Config, EngineKind, LanguageMode, config_dir, config_path, socket_path};
 use tokativ_engine::{Joiner, Transcriber};
-use tokativ_input::Inserter;
+use tokativ_input::{Inserter, Key, Method};
 use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
 
 use crate::assets::Assets;
 use crate::autostart;
 use crate::ipc::{self, Command};
 use crate::tray::{Tray, TrayEvent};
+
+/// What sits at the cursor while a segment is transcribed and no draft of it is ready.
+const PLACEHOLDER: &str = "…";
+/// How much new speech triggers another draft transcript.
+const DRAFT_EVERY: Duration = Duration::from_millis(600);
 
 /// Everything that reaches the daemon from another thread.
 enum Event {
@@ -31,6 +36,12 @@ enum Event {
         session: u64,
         result: Result<String>,
     },
+    Drafted {
+        session: u64,
+        segment: usize,
+        result: Result<String>,
+    },
+    Key(Key),
     ConfigFile,
 }
 
@@ -45,6 +56,13 @@ struct Session {
     joiner: Option<Joiner>,
     /// Segments handed to the transcriber whose text has not come back yet.
     pending: usize,
+    /// How many segments the recorder has finished, which is also the index of the one being
+    /// spoken now.
+    spoken: usize,
+    /// How many segments have come back and been inserted.
+    inserted: usize,
+    /// The draft shown at the cursor and the segment it belongs to.
+    draft: Option<(usize, String)>,
     /// The recorder may still deliver segments.
     capturing: bool,
     /// Confirm was pressed, so the session ends once the last segment is inserted.
@@ -69,6 +87,11 @@ pub struct Daemon {
 
 /// Starts the daemon and blocks until it quits.
 pub fn run(config: Config) -> Result<()> {
+    // A second start is not a failure, so a service manager does not keep retrying it.
+    if ipc::send(&socket_path(), Command::Ping).is_ok() {
+        log::info!("tokativ is already running");
+        return Ok(());
+    }
     let (events, receiver) = unbounded();
     let commands = events.clone();
     ipc::serve(&socket_path(), move |command| {
@@ -111,14 +134,7 @@ impl Daemon {
     fn new(config: Config, events: UnboundedSender<Event>, cx: &mut App) -> Result<Entity<Self>> {
         let (store, library, status) = tokativ_ui::entities(config.clone(), cx);
         let transcriber = Transcriber::start(idle_limit(&config))?;
-        let inserter =
-            match Inserter::start(config.insertion.backend, config.insertion.terminals.clone()) {
-                Ok(inserter) => Some(inserter),
-                Err(error) => {
-                    log::error!("text insertion is unavailable: {error:#}");
-                    None
-                }
-            };
+        let inserter = start_inserter(&config, &events);
 
         let (tray_events, mut tray_receiver) = unbounded();
         let forwarded = events.clone();
@@ -194,6 +210,13 @@ impl Daemon {
             Event::Tray(TrayEvent::Quit) => self.quit(cx),
             Event::Recorder { session, event } => self.recorded(session, event, cx),
             Event::Transcribed { session, result } => self.transcribed(session, result, cx),
+            Event::Drafted {
+                session,
+                segment,
+                result,
+            } => self.drafted(session, segment, result),
+            Event::Key(Key::Escape) => self.cancel(cx),
+            Event::Key(Key::Enter) => self.confirm(cx),
             Event::ConfigFile => match Config::load() {
                 Ok(config) => self.store.update(cx, |store, cx| store.replace(config, cx)),
                 Err(error) => log::warn!("config: keeping the running settings: {error:#}"),
@@ -250,6 +273,12 @@ impl Daemon {
         self.transcriber.preload(engine);
         tokativ_ui::refresh_theme(cx);
 
+        // Drafts show as preedit text, which only the input method can put at the cursor.
+        let drafts = config.live_preview
+            && self
+                .inserter
+                .as_ref()
+                .is_some_and(|inserter| inserter.status().method == Method::InputMethod);
         let recorder = Silero::new().and_then(|silero| {
             let events = self.events.clone();
             Recorder::start(
@@ -261,6 +290,7 @@ impl Daemon {
                         max_segment_s: config.vad.max_segment_s,
                         preroll_ms: config.vad.preroll_ms,
                     },
+                    progress: drafts.then_some(DRAFT_EVERY),
                 },
                 Some(Box::new(silero) as Box<dyn SpeechDetector>),
                 move |event| {
@@ -297,6 +327,9 @@ impl Daemon {
             pill,
             joiner: None,
             pending: 0,
+            spoken: 0,
+            inserted: 0,
+            draft: None,
             capturing: true,
             stopping: false,
         });
@@ -339,6 +372,9 @@ impl Daemon {
         if let Some(recorder) = session.recorder.take() {
             recorder.stop();
         }
+        if let Some(inserter) = &self.inserter {
+            inserter.release_keys();
+        }
         if let Some(pill) = session.pill {
             set_phase(pill, Phase::Processing, cx);
         }
@@ -365,6 +401,8 @@ impl Daemon {
             tokativ_audio::Event::Started => log::debug!("session {id}: speech"),
             tokativ_audio::Event::Segment(segment) => {
                 session.pending += 1;
+                let index = session.spoken;
+                session.spoken += 1;
                 log::debug!(
                     "session {id}: segment of {:.1} s{}",
                     segment.samples.len() as f32 / tokativ_audio::RATE as f32,
@@ -374,8 +412,11 @@ impl Daemon {
                         ""
                     }
                 );
-                if let Some(inserter) = &self.inserter {
-                    inserter.placeholder();
+                // The last draft of this segment stays up until its final text replaces it.
+                let drafted = matches!(&session.draft, Some((segment, _)) if *segment == index);
+                if !drafted && let Some(inserter) = &self.inserter {
+                    session.draft = Some((index, PLACEHOLDER.into()));
+                    inserter.preedit(PLACEHOLDER.into());
                 }
                 let events = self.events.clone();
                 self.transcriber
@@ -383,6 +424,20 @@ impl Daemon {
                         events
                             .unbounded_send(Event::Transcribed {
                                 session: id,
+                                result,
+                            })
+                            .ok();
+                    });
+            }
+            tokativ_audio::Event::Progress(samples) => {
+                let segment = session.spoken;
+                let events = self.events.clone();
+                self.transcriber
+                    .draft(session.engine, samples, move |result| {
+                        events
+                            .unbounded_send(Event::Drafted {
+                                session: id,
+                                segment,
                                 result,
                             })
                             .ok();
@@ -408,21 +463,59 @@ impl Daemon {
             return;
         };
         session.pending -= 1;
-        match result {
-            Ok(text) => {
-                log::debug!("session {id}: {text:?}");
-                if let Some(inserter) = &self.inserter {
-                    let joiner = session
-                        .joiner
-                        .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref()));
-                    if let Some(text) = joiner.join(&text) {
-                        inserter.insert(text, session.pending > 0);
-                    }
-                }
+        let segment = session.inserted;
+        session.inserted += 1;
+        // A draft of a later segment stays up, and a placeholder while earlier ones are pending.
+        let after = match &session.draft {
+            Some((drafted, text)) if *drafted > segment => text.clone(),
+            _ if session.pending > 0 => PLACEHOLDER.to_string(),
+            _ => String::new(),
+        };
+        if after.is_empty() {
+            session.draft = None;
+        }
+        let text = match result {
+            Ok(text) => text,
+            Err(error) => {
+                log::error!("session {id}: transcription failed: {error:#}");
+                String::new()
             }
-            Err(error) => log::error!("session {id}: transcription failed: {error:#}"),
+        };
+        log::debug!("session {id}: {text:?}");
+        if let Some(inserter) = &self.inserter {
+            let joiner = session
+                .joiner
+                .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref()));
+            match joiner.join(&text) {
+                Some(text) => inserter.insert(text, after),
+                None => inserter.preedit(after),
+            }
         }
         self.finish_if_done(cx);
+    }
+
+    /// Shows a draft of the segment being spoken, unless that segment has finished since.
+    fn drafted(&mut self, id: u64, segment: usize, result: Result<String>) {
+        let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
+            return;
+        };
+        if segment != session.spoken || session.stopping {
+            return;
+        }
+        let Ok(text) = result else {
+            return;
+        };
+        let Some(inserter) = &self.inserter else {
+            return;
+        };
+        let joiner = session
+            .joiner
+            .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref()));
+        if let Some(preview) = joiner.preview(&text) {
+            log::debug!("session {id}: draft {preview:?}");
+            session.draft = Some((segment, preview.clone()));
+            inserter.preedit(preview);
+        }
     }
 
     fn finish_if_done(&mut self, cx: &mut Context<Self>) {
@@ -466,10 +559,7 @@ impl Daemon {
             self.mode = config.language;
         }
         if old.insertion.backend != config.insertion.backend {
-            self.inserter =
-                Inserter::start(config.insertion.backend, config.insertion.terminals.clone())
-                    .map_err(|error| log::error!("text insertion is unavailable: {error:#}"))
-                    .ok();
+            self.inserter = start_inserter(&config, &self.events);
         } else if old.insertion.terminals != config.insertion.terminals
             && let Some(inserter) = &self.inserter
         {
@@ -564,6 +654,20 @@ fn set_phase(pill: WindowHandle<Pill>, phase: Phase, cx: &mut App) {
         pill.update(cx, |pill, window, cx| pill.set_phase(phase, window, cx))
             .ok();
     });
+}
+
+/// Connects the text insertion, with Escape and Enter fed back as events.
+fn start_inserter(config: &Config, events: &UnboundedSender<Event>) -> Option<Inserter> {
+    let keys = events.clone();
+    Inserter::start(
+        config.insertion.backend,
+        config.insertion.terminals.clone(),
+        move |key| {
+            keys.unbounded_send(Event::Key(key)).ok();
+        },
+    )
+    .map_err(|error| log::error!("text insertion is unavailable: {error:#}"))
+    .ok()
 }
 
 fn idle_limit(config: &Config) -> Option<Duration> {
