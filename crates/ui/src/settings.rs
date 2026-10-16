@@ -10,7 +10,7 @@ use ui::{
     ActiveTheme as _, Button, MenuItem, Picker, Popovers, Scrubber, ScrubberState, Switch, Text,
 };
 
-use crate::chrome::{self, meter, row, section};
+use crate::chrome::{self, group, meter, row};
 use crate::host::{Host, Library, ModelState, Status, Store};
 
 const WIDTH: f32 = 640.;
@@ -20,7 +20,8 @@ const SILENCE_MS: (f32, f32) = (200., 2000.);
 const THRESHOLD: (f32, f32) = (0.2, 0.9);
 const MARGIN: (f32, f32) = (0., 240.);
 const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
-pub(crate) const NIRI_BIND: &str = "binds {\n    Mod+D { spawn \"tokativ\" \"toggle\"; }\n    Mod+Shift+D { spawn \"tokativ\" \"cancel\"; }\n}";
+pub(crate) const NIRI_BIND: &str =
+    "Mod+D { spawn \"tokativ\" \"toggle\"; }\nMod+Shift+D { spawn \"tokativ\" \"cancel\"; }";
 
 struct Open(WindowHandle<Settings>);
 
@@ -138,16 +139,24 @@ impl Settings {
             .item(default_item)
             .items(device_items.collect::<Vec<_>>());
 
-        div()
-            .child(section("Dictation", cx))
-            .child(row(
-                "Language mode",
+        let live = config.live_preview;
+        let live_switch = Switch::new("live-preview", live)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.edit(cx, |config| config.live_preview = !live);
+            }))
+            .into_any_element();
+        group(
+            "Dictation",
+            vec![
+                row(
+                    "Language mode",
                 "The mode a session starts in. The hotkey and tray can switch it.",
                 language_picker.into_any_element(),
                 cx,
-            ))
-            .child(row(
-                "Engine for Auto",
+                )
+                .into_any_element(),
+                row(
+                    "Engine for Auto",
                 "Parakeet detects English, Russian and 23 more languages.",
                 self.engine_picker(
                     "engine-auto",
@@ -157,9 +166,10 @@ impl Settings {
                 )
                 .into_any_element(),
                 cx,
-            ))
-            .child(row(
-                "Engine for Russian",
+                )
+                .into_any_element(),
+                row(
+                    "Engine for Russian",
                 "GigaAM is trained on Russian only and punctuates it well.",
                 self.engine_picker(
                     "engine-russian",
@@ -169,13 +179,25 @@ impl Settings {
                 )
                 .into_any_element(),
                 cx,
-            ))
-            .child(row(
-                "Microphone",
+                )
+                .into_any_element(),
+                row(
+                    "Live text",
+                    "Show a draft of each phrase at the cursor while you speak. Needs the input method.",
+                    live_switch,
+                    cx,
+                )
+                .into_any_element(),
+                row(
+                    "Microphone",
                 "Used from the next session on.",
                 device_picker.into_any_element(),
                 cx,
-            ))
+                )
+                .into_any_element(),
+            ],
+            cx,
+        )
     }
 
     fn engine_picker(
@@ -211,38 +233,45 @@ impl Settings {
             .unwrap_or_else(|| fraction(config.vad.threshold, THRESHOLD));
         let threshold_value = value(threshold, THRESHOLD);
 
-        div()
-            .child(section("Voice detection", cx))
-            .child(row(
-                "Pause length",
-                "How long you pause before a phrase is transcribed and inserted.",
-                self.slider(
-                    &self.silence,
-                    silence,
-                    format!("{silence_ms} ms"),
-                    |this| &mut this.silence,
-                    |config, fraction| {
-                        config.vad.silence_ms = value(fraction, SILENCE_MS).round() as u32
-                    },
+        group(
+            "Voice detection",
+            vec![
+                row(
+                    "Pause length",
+                    "How long you pause before a phrase is transcribed and inserted.",
+                    self.slider(
+                        &self.silence,
+                        silence,
+                        format!("{silence_ms} ms"),
+                        |this| &mut this.silence,
+                        |config, fraction| {
+                            config.vad.silence_ms = value(fraction, SILENCE_MS).round() as u32
+                        },
+                        cx,
+                    ),
                     cx,
-                ),
-                cx,
-            ))
-            .child(row(
-                "Speech threshold",
-                "Higher ignores more background noise but may clip quiet words.",
-                self.slider(
-                    &self.threshold,
-                    threshold,
-                    format!("{threshold_value:.2}"),
-                    |this| &mut this.threshold,
-                    |config, fraction| {
-                        config.vad.threshold = (value(fraction, THRESHOLD) * 100.).round() / 100.
-                    },
+                )
+                .into_any_element(),
+                row(
+                    "Speech threshold",
+                    "Higher ignores more background noise but may clip quiet words.",
+                    self.slider(
+                        &self.threshold,
+                        threshold,
+                        format!("{threshold_value:.2}"),
+                        |this| &mut this.threshold,
+                        |config, fraction| {
+                            config.vad.threshold =
+                                (value(fraction, THRESHOLD) * 100.).round() / 100.
+                        },
+                        cx,
+                    ),
                     cx,
-                ),
-                cx,
-            ))
+                )
+                .into_any_element(),
+            ],
+            cx,
+        )
     }
 
     /// A slider row's control: the scrubber and the value beside it.
@@ -307,12 +336,11 @@ impl Settings {
                     this.edit(cx, |config| config.insertion.backend = choice);
                 }))
             }));
-        div().child(section("Insertion", cx)).child(row(
-            "Method",
-            detail,
-            picker.into_any_element(),
+        group(
+            "Insertion",
+            vec![row("Method", detail, picker.into_any_element(), cx).into_any_element()],
             cx,
-        ))
+        )
     }
 
     fn pill(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
@@ -334,27 +362,33 @@ impl Settings {
             .dragging
             .unwrap_or_else(|| fraction(config.pill.margin, MARGIN));
         let pixels = value(margin, MARGIN).round();
-        div()
-            .child(section("Pill", cx))
-            .child(row(
-                "Position",
-                "The edge of the focused screen the pill appears on.",
-                picker.into_any_element(),
-                cx,
-            ))
-            .child(row(
-                "Distance from the edge",
-                "Measured to the pill itself.",
-                self.slider(
-                    &self.margin,
-                    margin,
-                    format!("{pixels} px"),
-                    |this| &mut this.margin,
-                    |config, fraction| config.pill.margin = value(fraction, MARGIN).round(),
+        group(
+            "Pill",
+            vec![
+                row(
+                    "Position",
+                    "The edge of the focused screen the pill appears on.",
+                    picker.into_any_element(),
                     cx,
-                ),
-                cx,
-            ))
+                )
+                .into_any_element(),
+                row(
+                    "Distance from the edge",
+                    "Measured to the pill itself.",
+                    self.slider(
+                        &self.margin,
+                        margin,
+                        format!("{pixels} px"),
+                        |this| &mut this.margin,
+                        |config, fraction| config.pill.margin = value(fraction, MARGIN).round(),
+                        cx,
+                    ),
+                    cx,
+                )
+                .into_any_element(),
+            ],
+            cx,
+        )
     }
 
     fn system(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
@@ -377,10 +411,11 @@ impl Settings {
                     this.edit(cx, |config| config.models.unload_after_minutes = minutes);
                 }))
             }));
-        div()
-            .child(section("System", cx))
-            .child(row(
-                "Launch at login",
+        group(
+            "System",
+            vec![
+                row(
+                    "Launch at login",
                 "Adds an autostart entry. Not needed with the Home Manager service.",
                 Switch::new("login", login)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -388,9 +423,10 @@ impl Settings {
                     }))
                     .into_any_element(),
                 cx,
-            ))
-            .child(row(
-                "Tray icon",
+                )
+                .into_any_element(),
+                row(
+                    "Tray icon",
                 "Start, stop and switch language from the panel.",
                 Switch::new("tray", tray)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -398,13 +434,18 @@ impl Settings {
                     }))
                     .into_any_element(),
                 cx,
-            ))
-            .child(row(
-                "Unload models",
+                )
+                .into_any_element(),
+                row(
+                    "Unload models",
                 "Frees about a gigabyte of memory between sessions, at the cost of a slower start.",
                 idle_picker.into_any_element(),
                 cx,
-            ))
+                )
+                .into_any_element(),
+            ],
+            cx,
+        )
     }
 
     fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -413,42 +454,109 @@ impl Settings {
             .into_iter()
             .map(|kind| (kind, library.state(kind)))
             .collect();
-        div().child(section("Models", cx)).children(
+        group(
+            "Models",
             rows.into_iter()
-                .map(|(kind, state)| model_row(kind, state, &self.library, cx)),
+                .map(|(kind, state)| model_row(kind, state, &self.library, cx).into_any_element())
+                .collect(),
+            cx,
         )
     }
 
     fn hotkey(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let copy = Button::new("copy-bind")
+            .label("Copy")
+            .icon("icons/copy.svg")
+            .small()
+            .outline()
+            .on_click(|_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(NIRI_BIND.to_owned()))
+            });
+        group(
+            "Hotkey",
+            vec![
+                row(
+                    "niri keybind",
+                    "Press once to start and again to insert the rest. While the pill is up, Escape cancels and Enter inserts.",
+                    copy.into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+                chrome::code(NIRI_BIND, cx).into_any_element(),
+            ],
+            cx,
+        )
+    }
+
+    /// The window's opening: what the app is and whether it is listening right now.
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let status = self.status.read(cx);
+        let (label, dot) = match status.recording {
+            true => ("Listening", theme.danger),
+            false => ("Ready", theme.progress_bar),
+        };
+        let mark = theme.metrics.control * 1.4;
         div()
-            .child(section("Hotkey", cx))
+            .flex()
+            .items_center()
+            .gap_4()
+            .pt_6()
+            .pb_2()
             .child(
                 div()
-                    .py_3()
+                    .flex_none()
+                    .size(mark)
+                    .rounded(mark / 2.)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.foreground)
+                    .child(
+                        gpui::svg()
+                            .path(icons::path("icons/mic-vocal.svg"))
+                            .size(mark * 0.5)
+                            .text_color(theme.background),
+                    ),
+            )
+            .child(
+                div()
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
                     .child(
                         div()
-                            .text_color(cx.theme().muted_foreground)
-                            .text_size(cx.theme().text(Text::Small))
-                            .child("Add this to your niri config, then press the key to start and again to insert."),
+                            .text_size(theme.text(Text::Large))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Tokativ"),
                     )
-                    .child(chrome::code(NIRI_BIND, cx))
                     .child(
-                        div().child(
-                            Button::new("copy-bind")
-                                .label("Copy")
-                                .icon("icons/copy.svg")
-                                .small()
-                                .outline()
-                                .on_click(|_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        NIRI_BIND.to_owned(),
-                                    ))
-                                }),
-                        ),
+                        div()
+                            .text_size(theme.text(Text::Small))
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "{} mode, inserting with {}",
+                                status.mode.name(),
+                                status.method.to_lowercase()
+                            )),
                     ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(theme.text(Text::Small))
+                    .child(div().size(px(7.)).rounded_full().bg(dot))
+                    .child(label),
             )
     }
 }
@@ -511,7 +619,12 @@ pub(crate) fn model_row(
     div()
         .child(row(kind.name(), detail, action.into_any_element(), cx))
         .when_some(progress, |this, progress| {
-            this.child(div().pb_3().child(meter(progress, px(8.), cx)))
+            this.child(
+                div()
+                    .pb_3()
+                    .px(chrome::GROUP_PADDING)
+                    .child(meter(progress, px(8.), cx)),
+            )
         })
 }
 
@@ -531,7 +644,8 @@ impl Render for Settings {
                     .pb_6()
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_4()
+                    .child(self.header(cx))
                     .child(self.dictation(&config, cx))
                     .child(self.detection(&config, cx))
                     .child(self.insertion(&config, cx))

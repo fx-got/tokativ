@@ -104,8 +104,37 @@ pub fn section(label: &str, cx: &App) -> impl IntoElement {
         .flex()
         .flex_col()
         .justify_end()
-        .pb_1()
+        .pb_2()
+        .pl_1()
         .child(ui::eyebrow(label.to_owned(), cx))
+}
+
+/// The corner radius of a settings group. Anything inset in a group takes its corners from this
+/// through [`crate::nested_radius`].
+pub const GROUP_RADIUS: Pixels = px(14.);
+/// How far a group's rows sit from its edges.
+pub const GROUP_PADDING: Pixels = px(16.);
+
+/// A labelled group of settings rows on a raised surface, with a hairline between rows.
+pub fn group(label: &str, rows: Vec<AnyElement>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let count = rows.len();
+    div().child(section(label, cx)).child(
+        div()
+            .flex()
+            .flex_col()
+            .rounded(GROUP_RADIUS)
+            .bg(theme.secondary.opacity(0.45))
+            .border_1()
+            .border_color(theme.border.opacity(0.6))
+            .children(rows.into_iter().enumerate().map(move |(index, row)| {
+                div()
+                    .when(index + 1 < count, |this| {
+                        this.border_b_1().border_color(theme.border.opacity(0.5))
+                    })
+                    .child(row)
+            })),
+    )
 }
 
 /// A settings row: a title with a muted line under it on the left, the control on the right.
@@ -122,6 +151,7 @@ pub fn row(
         .justify_between()
         .gap_4()
         .py_3()
+        .px(GROUP_PADDING)
         .child(
             div()
                 .flex()
@@ -168,19 +198,27 @@ pub fn meter(fraction: f32, height: Pixels, cx: &App) -> impl IntoElement {
         )
 }
 
-/// A box of monospaced text, such as a config snippet to copy.
+/// How far a snippet sits from the edges of the group it closes.
+const CODE_INSET: Pixels = px(6.);
+
+/// A box of monospaced text, such as a config snippet to copy. It closes a group, inset by the
+/// same amount from the group's sides and bottom, so its lower corners follow the group's.
 pub fn code(text: &str, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    div()
-        .w_full()
-        .p_3()
-        .rounded(theme.radius)
-        .bg(theme.secondary)
-        .border_1()
-        .border_color(theme.border)
-        .font_family("monospace")
-        .text_size(theme.text(Text::Small))
-        .child(text.to_owned())
+    let radius = crate::nested_radius(GROUP_RADIUS, CODE_INSET);
+    div().w_full().p(CODE_INSET).child(
+        div()
+            .w_full()
+            .px(GROUP_PADDING - CODE_INSET)
+            .py_3()
+            .rounded(radius)
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .font_family("monospace")
+            .text_size(theme.text(Text::Small))
+            .child(text.to_owned()),
+    )
 }
 
 /// Bytes as megabytes or gigabytes, the way the model list shows sizes.
