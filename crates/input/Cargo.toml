@@ -1,0 +1,15 @@
+[package]
+name = "tokativ-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+rustix.workspace = true
+serde_json.workspace = true
+tokativ-config.workspace = true
+wayland-client.workspace = true
+wayland-protocols-misc.workspace = true
+wl-clipboard-rs.workspace = true
