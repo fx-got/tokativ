@@ -533,7 +533,7 @@ impl Daemon {
         }
         if let Some(pill) = session.pill {
             cx.defer(move |cx| {
-                pill.update(cx, |_, window, _| window.remove_window()).ok();
+                pill.update(cx, |pill, _, cx| pill.dismiss(cx)).ok();
             });
         }
         self.publish(cx);

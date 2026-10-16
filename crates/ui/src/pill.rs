@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Hsla, Pixels, Size, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, canvas, div, point, px, svg,
+    App, Bounds, Context, Hsla, Pixels, Size, SpringConfig, SpringState, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div,
+    point, px, svg,
 };
 use tokativ_audio::{BANDS, Levels};
 use tokativ_config::{APP_ID, PillEdge};
@@ -45,6 +46,25 @@ const SETTLE: Duration = Duration::from_millis(45);
 const PULSE: Duration = Duration::from_millis(1100);
 const ERROR_HOLD: Duration = Duration::from_millis(1400);
 const ICON: Pixels = px(16.);
+/// The capsule's opening: quick, with a little overshoot so it lands with a bounce.
+const OPEN: SpringConfig = SpringConfig::new(320., 19., 1.);
+/// The buttons popping in once the capsule has room for them.
+const POP: SpringConfig = SpringConfig::new(420., 22., 1.);
+/// Closing is near critically damped, so the capsule folds away without wobbling.
+const CLOSE: SpringConfig = SpringConfig::new(520., 44., 1.);
+/// How long after opening the buttons start to pop in.
+const CONTROLS_DELAY: Duration = Duration::from_millis(70);
+/// When the middle bars light up, and how much later each bar further out follows.
+const BARS_DELAY: Duration = Duration::from_millis(110);
+const BARS_STAGGER: Duration = Duration::from_millis(24);
+const BAR_REVEAL: Duration = Duration::from_millis(200);
+/// How fast the bars go out when the pill closes, before the capsule folds.
+const BARS_FADE: Duration = Duration::from_millis(90);
+/// The longest a close may take before the window goes regardless.
+const CLOSE_LIMIT: Duration = Duration::from_millis(700);
+/// How small and how blurred the capsule is when folded.
+const FOLDED_SCALE: f32 = 0.82;
+const FOLDED_BLUR: Pixels = px(8.);
 
 /// What the session is doing, which is what the bars show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +86,54 @@ pub struct Pill {
     since: Instant,
     on_confirm: Handler,
     on_cancel: Handler,
+    opened: Instant,
+    /// When the pill started to close, if it has.
+    closing: Option<Instant>,
+    /// How far the capsule has unfolded, from a dot at 0 to full width at 1.
+    body: Spring,
+    /// How far the buttons have popped in.
+    controls: Spring,
+    /// The window removal is already queued.
+    removed: bool,
+}
+
+/// One animated value driven by a spring towards its target.
+struct Spring {
+    config: SpringConfig,
+    state: SpringState,
+    target: f32,
+}
+
+impl Spring {
+    fn new(config: SpringConfig) -> Self {
+        Self {
+            config,
+            state: SpringState {
+                position: 0.,
+                velocity: 0.,
+            },
+            target: 0.,
+        }
+    }
+
+    fn aim(&mut self, target: f32, config: SpringConfig) {
+        self.target = target;
+        self.config = config;
+    }
+
+    fn step(&mut self, elapsed: Duration) {
+        self.state = self
+            .config
+            .step(self.state, self.target, elapsed.as_secs_f32());
+    }
+
+    fn at(&self) -> f32 {
+        self.state.position
+    }
+
+    fn settled(&self) -> bool {
+        self.config.is_settled(self.state, self.target, 0.01)
+    }
 }
 
 /// Opens the pill on the focused output. `levels` feeds the bars, and the handlers run when
@@ -123,6 +191,11 @@ pub fn open(
                 since: Instant::now(),
                 on_confirm,
                 on_cancel,
+                opened: Instant::now(),
+                closing: None,
+                body: Spring::new(OPEN),
+                controls: Spring::new(POP),
+                removed: false,
             })
         },
     )
@@ -136,23 +209,81 @@ impl Pill {
         self.phase = phase;
         self.since = Instant::now();
         if phase == Phase::Error {
-            cx.spawn_in(window, async move |_, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(ERROR_HOLD).await;
-                cx.update(|window, _| window.remove_window()).ok();
+                this.update_in(cx, |pill, _, cx| pill.dismiss(cx)).ok();
             })
             .detach();
         }
         cx.notify();
     }
 
+    /// Folds the pill away and closes its window once the motion has finished.
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.closing.is_none() {
+            self.closing = Some(Instant::now());
+            self.body.aim(0., CLOSE);
+            self.controls.aim(0., CLOSE);
+            cx.notify();
+        }
+    }
+
+    /// Advances the opening or closing motion. Returns false once a close has finished.
+    fn animate(&mut self, elapsed: Duration, still: bool) -> bool {
+        match self.closing {
+            None => {
+                self.body.target = 1.;
+                if self.opened.elapsed() >= CONTROLS_DELAY {
+                    self.controls.target = 1.;
+                }
+            }
+            Some(closing) if closing.elapsed() < BARS_FADE => {
+                // The bars go out first, then the buttons and the capsule fold.
+                self.controls.target = self.controls.at();
+                self.body.target = self.body.at();
+            }
+            Some(_) => {
+                self.controls.aim(0., CLOSE);
+                self.body.aim(0., CLOSE);
+            }
+        }
+        if still {
+            self.body.state.position = self.body.target;
+            self.controls.state.position = self.controls.target;
+        } else {
+            self.body.step(elapsed);
+            self.controls.step(elapsed);
+        }
+        let Some(closing) = self.closing else {
+            return true;
+        };
+        let folded = closing.elapsed() >= BARS_FADE && self.body.at() < 0.02 && self.body.settled();
+        !(folded || still || closing.elapsed() >= CLOSE_LIMIT)
+    }
+
+    /// How much of each bar shows: they light up from the middle outwards after opening and all
+    /// go out together on close.
+    fn reveal(&self) -> [f32; BARS] {
+        let opened = self.opened.elapsed().as_secs_f32();
+        let fade = self.closing.map_or(1., |closing| {
+            1. - (closing.elapsed().as_secs_f32() / BARS_FADE.as_secs_f32()).min(1.)
+        });
+        let middle = (BARS - 1) as f32 / 2.;
+        std::array::from_fn(|index| {
+            let delay = BARS_DELAY.as_secs_f32()
+                + BARS_STAGGER.as_secs_f32() * (index as f32 - middle).abs().floor();
+            let t = ((opened - delay) / BAR_REVEAL.as_secs_f32()).clamp(0., 1.);
+            ui::ease_out_cubic(t) * fade
+        })
+    }
+
     /// Eases the drawn bars towards the latest levels at a rate that follows the real time
     /// between frames, so the motion looks the same at any refresh rate.
-    fn step(&mut self) {
+    fn step(&mut self) -> Duration {
         let now = Instant::now();
-        let elapsed = self
-            .beat
-            .replace(now)
-            .map_or(Duration::ZERO, |beat| now - beat);
+        let elapsed = self.beat.replace(now).map_or(Duration::ZERO, |beat| {
+            (now - beat).min(Duration::from_millis(50))
+        });
         let rate = 1. - (-elapsed.as_secs_f32() / SETTLE.as_secs_f32()).exp();
         let target = match self.phase {
             Phase::Listening => self.levels.read(),
@@ -161,6 +292,7 @@ impl Pill {
         for (shown, target) in self.shown.iter_mut().zip(target) {
             *shown += (target - *shown) * rate;
         }
+        elapsed
     }
 
     /// How opaque the bars are, which pulses while the last segments are transcribed.
@@ -178,7 +310,12 @@ impl Pill {
 
 impl Render for Pill {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.step();
+        let elapsed = self.step();
+        if !self.animate(elapsed, cx.reduce_motion()) && !self.removed {
+            // This only marks the window, GPUI closes it once the frame is done.
+            self.removed = true;
+            window.remove_window();
+        }
         window.request_animation_frame();
 
         let theme = cx.theme();
@@ -191,40 +328,72 @@ impl Render for Pill {
         };
         let bar_color = theme.foreground.opacity(self.intensity());
         let shown = self.shown;
+        let reveal = self.reveal();
         let on_confirm = self.on_confirm.clone();
         let on_cancel = self.on_cancel.clone();
         let listening = self.phase == Phase::Listening;
 
-        div().size_full().p(SHADOW).font_family("Inter").child(
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_between()
-                .p(PADDING - BORDER)
-                .rounded(radius)
-                .bg(surface)
-                .border_1()
-                .border_color(theme.border)
-                .shadow_lg()
-                .child(
-                    circle("cancel", button, theme.secondary, theme.secondary_hover)
-                        .child(icon("icons/x.svg", theme.foreground))
-                        .on_click(move |_, _, cx| on_cancel(cx)),
-                )
-                .child(bars(shown, bar_color).flex_1().h_full())
-                .child(
-                    circle(
-                        "confirm",
-                        button,
-                        theme.foreground,
-                        theme.foreground.opacity(0.85),
+        // The capsule unfolds sideways from a dot, growing and sharpening as it goes. The spring
+        // overshoots a little, so it lands slightly wide and settles back.
+        let body = self.body.at().max(0.);
+        let unfolded = body.min(1.);
+        let width = HEIGHT + (WIDTH - HEIGHT) * body;
+        let scale = FOLDED_SCALE + (1. - FOLDED_SCALE) * body;
+        let controls = self.controls.at().max(0.);
+        let pop = (0.4 + 0.6 * controls).max(0.01);
+        let control_opacity = controls.min(1.);
+
+        div()
+            .size_full()
+            .p(SHADOW)
+            .flex()
+            .items_center()
+            .justify_center()
+            .font_family("Inter")
+            .child(
+                div()
+                    .flex_none()
+                    .w(width)
+                    .h(HEIGHT)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .p(PADDING - BORDER)
+                    .rounded(radius)
+                    .bg(surface)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .opacity((unfolded * 2.5).min(1.))
+                    .layer_scale(scale.max(0.01))
+                    .when(unfolded < 1., |this| {
+                        this.blur(FOLDED_BLUR * (1. - unfolded))
+                    })
+                    .child(
+                        circle("cancel", button, theme.secondary, theme.secondary_hover)
+                            .opacity(control_opacity)
+                            .layer_scale(pop)
+                            .child(icon("icons/x.svg", theme.foreground))
+                            .on_click(move |_, _, cx| on_cancel(cx)),
                     )
-                    .when(!listening, |this| this.opacity(0.5))
-                    .child(icon("icons/check.svg", theme.background))
-                    .on_click(move |_, _, cx| on_confirm(cx)),
-                ),
-        )
+                    .child(bars(shown, reveal, bar_color).flex_1().h_full())
+                    .child(
+                        circle(
+                            "confirm",
+                            button,
+                            theme.foreground,
+                            theme.foreground.opacity(0.85),
+                        )
+                        .opacity(match listening {
+                            true => control_opacity,
+                            false => control_opacity * 0.5,
+                        })
+                        .layer_scale(pop)
+                        .child(icon("icons/check.svg", theme.background))
+                        .on_click(move |_, _, cx| on_confirm(cx)),
+                    ),
+            )
     }
 }
 
@@ -247,10 +416,10 @@ fn icon(path: &'static str, color: Hsla) -> impl IntoElement {
 }
 
 /// Paints the bars as rounded rectangles centered on the pill's midline, low frequencies on the
-/// left. A silent band draws a dot as tall as the bar is wide, so silence reads as a flat dotted
+/// left. `reveal` says how much of each bar shows while the pill opens and closes. A silent band draws a dot as tall as the bar is wide, so silence reads as a flat dotted
 /// line. Every edge lands on a whole device pixel, so at fractional scales all bars come out the
 /// same width and the dots sit on one line.
-fn bars(levels: [f32; BARS], color: Hsla) -> gpui::Div {
+fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla) -> gpui::Div {
     div().child(
         canvas(
             |_, _, _| {},
@@ -264,9 +433,12 @@ fn bars(levels: [f32; BARS], color: Hsla) -> gpui::Div {
                     + ((device(bounds.size.width.as_f32()) - span) / 2.).round();
                 let middle = device(bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.);
                 let reach = bounds.size.height.as_f32() * BAR_REACH * scale;
-                for (index, level) in levels.into_iter().enumerate() {
+                for (index, (level, shown)) in levels.into_iter().zip(reveal).enumerate() {
+                    if shown <= 0. {
+                        continue;
+                    }
                     // Rounding to the bar's own parity keeps every bar centered on the same line.
-                    let mut height = (reach * level.clamp(0., 1.)).round().max(width);
+                    let mut height = (reach * level.clamp(0., 1.) * shown).round().max(width);
                     if (height - width) % 2. != 0. {
                         height += 1.;
                     }
@@ -276,6 +448,7 @@ fn bars(levels: [f32; BARS], color: Hsla) -> gpui::Div {
                         origin: point(px(x / scale), px(top / scale)),
                         size: Size::new(px(width / scale), px(height / scale)),
                     };
+                    let color = color.opacity(shown);
                     window.paint_quad(gpui::fill(bar, color).corner_radii(px(width / scale / 2.)));
                 }
             },
