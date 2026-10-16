@@ -17,18 +17,27 @@ use ui::ActiveTheme as _;
 
 use crate::radius::nested_radius;
 
-const HEIGHT: Pixels = px(44.);
-const WIDTH: Pixels = px(216.);
+const HEIGHT_PX: f32 = 44.;
+const HEIGHT: Pixels = px(HEIGHT_PX);
 /// The gap between the pill's edge and its buttons, the same on every side a button touches.
-const PADDING: Pixels = px(6.);
+const PADDING_PX: f32 = 6.;
+const PADDING: Pixels = px(PADDING_PX);
 /// The pill's outline, which counts towards the padding so the buttons sit exactly `PADDING`
 /// from the outer edge.
 const BORDER: Pixels = px(1.);
 /// Room around the pill for its shadow. Clicks there fall through to whatever is below.
 const SHADOW: Pixels = px(14.);
-const BARS: usize = BANDS * 2;
-const BAR_WIDTH: Pixels = px(3.);
-const BAR_GAP: Pixels = px(3.);
+const BARS: usize = BANDS;
+const BAR_WIDTH_PX: f32 = 3.;
+const BAR_GAP_PX: f32 = 4.;
+/// The space between each button and the nearest bar.
+const BAR_MARGIN_PX: f32 = 12.;
+/// Just wide enough for the two buttons and the bars between them.
+const WIDTH: Pixels = px(PADDING_PX * 2.
+    + (HEIGHT_PX - PADDING_PX * 2.) * 2.
+    + BAR_MARGIN_PX * 2.
+    + BAR_WIDTH_PX * BARS as f32
+    + BAR_GAP_PX * (BARS - 1) as f32);
 /// The tallest a bar grows, as a share of the pill's height.
 const BAR_REACH: f32 = 0.62;
 /// How long the bars take to settle a change, as the time constant of their easing.
@@ -146,7 +155,7 @@ impl Pill {
             .map_or(Duration::ZERO, |beat| now - beat);
         let rate = 1. - (-elapsed.as_secs_f32() / SETTLE.as_secs_f32()).exp();
         let target = match self.phase {
-            Phase::Listening => mirrored(self.levels.read()),
+            Phase::Listening => self.levels.read(),
             Phase::Processing | Phase::Error => [0.; BARS],
         };
         for (shown, target) in self.shown.iter_mut().zip(target) {
@@ -165,18 +174,6 @@ impl Pill {
             Phase::Error => 0.5,
         }
     }
-}
-
-/// Lays the bands out low to high from the middle outwards on both sides, so the shape is
-/// symmetric and the voice's strongest range sits in the center.
-fn mirrored(bands: [f32; BANDS]) -> [f32; BARS] {
-    std::array::from_fn(|index| {
-        let distance = match index < BANDS {
-            true => BANDS - 1 - index,
-            false => index - BANDS,
-        };
-        bands[distance]
-    })
 }
 
 impl Render for Pill {
@@ -249,25 +246,37 @@ fn icon(path: &'static str, color: Hsla) -> impl IntoElement {
     svg().path(icons::path(path)).size(ICON).text_color(color)
 }
 
-/// Paints the bars as rounded rectangles centered on the pill's midline. A silent band draws a
-/// dot as tall as the bar is wide, so silence reads as a flat dotted line.
+/// Paints the bars as rounded rectangles centered on the pill's midline, low frequencies on the
+/// left. A silent band draws a dot as tall as the bar is wide, so silence reads as a flat dotted
+/// line. Every edge lands on a whole device pixel, so at fractional scales all bars come out the
+/// same width and the dots sit on one line.
 fn bars(levels: [f32; BARS], color: Hsla) -> gpui::Div {
     div().child(
         canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
-                let span = BAR_WIDTH * BARS as f32 + BAR_GAP * (BARS - 1) as f32;
-                let left = bounds.origin.x + (bounds.size.width - span) / 2.;
-                let middle = bounds.origin.y + bounds.size.height / 2.;
-                let reach = bounds.size.height * BAR_REACH;
+                let scale = window.scale_factor();
+                let device = |logical: f32| (logical * scale).round();
+                let width = device(BAR_WIDTH_PX).max(1.);
+                let gap = device(BAR_GAP_PX).max(1.);
+                let span = width * BARS as f32 + gap * (BARS - 1) as f32;
+                let left = device(bounds.origin.x.as_f32())
+                    + ((device(bounds.size.width.as_f32()) - span) / 2.).round();
+                let middle = device(bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.);
+                let reach = bounds.size.height.as_f32() * BAR_REACH * scale;
                 for (index, level) in levels.into_iter().enumerate() {
-                    let height = (reach * level.clamp(0., 1.)).max(BAR_WIDTH);
-                    let x = left + (BAR_WIDTH + BAR_GAP) * index as f32;
+                    // Rounding to the bar's own parity keeps every bar centered on the same line.
+                    let mut height = (reach * level.clamp(0., 1.)).round().max(width);
+                    if (height - width) % 2. != 0. {
+                        height += 1.;
+                    }
+                    let x = left + (width + gap) * index as f32;
+                    let top = middle - ((height - width) / 2.) - (width / 2.).floor();
                     let bar = Bounds {
-                        origin: point(x, middle - height / 2.),
-                        size: Size::new(BAR_WIDTH, height),
+                        origin: point(px(x / scale), px(top / scale)),
+                        size: Size::new(px(width / scale), px(height / scale)),
                     };
-                    window.paint_quad(gpui::fill(bar, color).corner_radii(BAR_WIDTH / 2.));
+                    window.paint_quad(gpui::fill(bar, color).corner_radii(px(width / scale / 2.)));
                 }
             },
         )
@@ -290,16 +299,6 @@ fn mix(from: Hsla, to: Hsla, amount: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bands_mirror_from_the_middle() {
-        let bands = std::array::from_fn(|index| index as f32);
-        let bars = mirrored(bands);
-        assert_eq!(bars[BANDS - 1], 0.);
-        assert_eq!(bars[BANDS], 0.);
-        assert_eq!(bars[0], (BANDS - 1) as f32);
-        assert_eq!(bars[BARS - 1], (BANDS - 1) as f32);
-    }
 
     #[test]
     fn buttons_follow_the_radius_rule() {
