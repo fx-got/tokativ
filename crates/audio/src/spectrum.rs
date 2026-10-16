@@ -1,6 +1,7 @@
-//! Band levels of the microphone for the pill's bars. The analysis is Sonora's
+//! Band levels of the microphone for the pill's bars. The FFT and band layout are Sonora's
 //! `music::spectrum` cut down to one mono channel, with half-overlapping windows so the bars move
-//! at the display's pace rather than every 43 ms.
+//! at the display's pace. Levels are judged in decibels against the room's own noise and the
+//! speaker's own loudness, so a quiet microphone moves the bars as much as a loud one.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -8,17 +9,25 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rustfft::num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 
-/// How many bands the analyzer splits the voice range into. The pill mirrors them around its
-/// center, so it draws twice as many bars.
-pub const BANDS: usize = 8;
+/// How many bands the analyzer splits the voice range into, one per bar in the pill.
+pub const BANDS: usize = 10;
 const FFT_SIZE: usize = 1024;
 const HOP: usize = FFT_SIZE / 2;
 /// Speech carries little below 100 Hz and its consonants thin out above 6 kHz.
 const MIN_FREQ: f32 = 100.;
 const MAX_FREQ: f32 = 6_000.;
-/// A microphone delivers far less level than a mastered track, so it is lifted harder than
-/// Sonora lifts music.
-const GAIN: f32 = 24.;
+/// How far above the room's noise a band must rise before its bar leaves the idle line.
+const NOISE_MARGIN: f32 = 10.;
+/// The noise estimate drops at once to a quieter window and creeps up this many decibels per
+/// window otherwise, so speech never gets mistaken for noise.
+const NOISE_RISE: f32 = 0.02;
+const NOISE_RANGE: (f32, f32) = (-110., -45.);
+/// The loudness estimate jumps to a louder window and falls this many decibels per window,
+/// about 9 dB a second, so the bars keep their reach as the speaker gets quieter.
+const LOUDNESS_FALL: f32 = 0.1;
+/// The least span between the idle line and full height. Without it, steady noise would be
+/// stretched to fill the bars.
+const MIN_SPAN: f32 = 24.;
 /// The level past which a band is compressed towards the ceiling instead of cut at it.
 const KNEE: f32 = 0.6;
 const ATTACK: f32 = 0.7;
@@ -69,6 +78,10 @@ pub(crate) struct Analyzer {
     buffer: Vec<Complex32>,
     scratch: Vec<Complex32>,
     smoothed: [f32; BANDS],
+    /// The room's noise in dBFS, as the quietest recent windows put it.
+    noise: f32,
+    /// The speaker's recent loudness in dBFS.
+    loudness: f32,
 }
 
 impl Analyzer {
@@ -84,6 +97,8 @@ impl Analyzer {
             buffer: vec![Complex32::default(); FFT_SIZE],
             scratch,
             smoothed: [0.; BANDS],
+            noise: NOISE_RANGE.1,
+            loudness: NOISE_RANGE.1 + MIN_SPAN,
         }
     }
 
@@ -103,6 +118,7 @@ impl Analyzer {
         self.fft
             .process_with_scratch(&mut self.buffer, &mut self.scratch);
 
+        let mut decibels = [0f32; BANDS];
         for (band, edge) in self.edges.windows(2).enumerate() {
             let low = edge[0];
             let high = edge[1].max(low + 1);
@@ -110,7 +126,22 @@ impl Analyzer {
                 .iter()
                 .map(|bin| bin.norm())
                 .fold(0f32, f32::max);
-            let target = soften((magnitude * GAIN / (FFT_SIZE as f32 / 2.)).sqrt());
+            decibels[band] = dbfs(magnitude);
+        }
+        let loudest = decibels.into_iter().fold(f32::MIN, f32::max);
+        self.noise = match loudest < self.noise {
+            true => loudest,
+            false => self.noise + NOISE_RISE,
+        }
+        .clamp(NOISE_RANGE.0, NOISE_RANGE.1);
+        let floor = self.noise + NOISE_MARGIN;
+        self.loudness = loudest
+            .max(self.loudness - LOUDNESS_FALL)
+            .max(floor + MIN_SPAN);
+        let span = self.loudness - floor;
+
+        for (band, decibels) in decibels.into_iter().enumerate() {
+            let target = soften(((decibels - floor) / span).clamp(0., 1.));
             let rate = match target > self.smoothed[band] {
                 true => ATTACK,
                 false => DECAY,
@@ -119,6 +150,12 @@ impl Analyzer {
             self.levels.set(band, self.smoothed[band]);
         }
     }
+}
+
+/// A peak bin's magnitude as the level of the sine that would produce it, in dBFS. A Hann window
+/// sums to half the window length, so a full-scale sine peaks at a quarter of it.
+fn dbfs(magnitude: f32) -> f32 {
+    20. * (magnitude / (FFT_SIZE as f32 / 4.)).max(1e-6).log10()
 }
 
 fn hann_window() -> Vec<f32> {
@@ -170,6 +207,22 @@ mod tests {
             edges[loudest] <= bin && bin <= edges[loudest + 1],
             "{bands:?}"
         );
+    }
+
+    #[test]
+    fn a_quiet_voice_still_fills_the_bars() {
+        let levels = Levels::default();
+        let mut analyzer = Analyzer::new(48_000, levels.clone());
+        let noise: Vec<f32> = (0..48_000)
+            .map(|i| 0.000_02 * (i as f32 * 12.9898).sin().fract())
+            .collect();
+        analyzer.push(&noise);
+        let amplitude = 10f32.powf(-55. / 20.);
+        let tone: Vec<f32> = (0..24_000)
+            .map(|i| amplitude * (std::f32::consts::TAU * 400. * i as f32 / 48_000.).sin())
+            .collect();
+        analyzer.push(&tone);
+        assert!(levels.peak() > 0.5, "{:?}", levels.read());
     }
 
     #[test]
