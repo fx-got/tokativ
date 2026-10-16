@@ -4,12 +4,13 @@ Dictation for Linux on Wayland that runs entirely on your machine. Press a key, 
 lands in the focused app phrase by phrase while you speak. A pill at the bottom of the screen shows
 your voice and has buttons to cancel or finish.
 
-Two speech models are supported, both running on the CPU through ONNX Runtime:
+You pick one speech model and dictate in whatever it understands. Both run on the CPU through
+ONNX Runtime:
 
-| Engine | Model | Languages | Used for |
-| --- | --- | --- | --- |
-| Parakeet | parakeet-tdt-0.6b-v3, int8 | 25 European languages including English and Russian, detected per phrase | Auto mode |
-| GigaAM | GigaAM v3 e2e CTC, int8 | Russian, with punctuation | Russian mode |
+| Model | Export | Languages |
+| --- | --- | --- |
+| Parakeet v3 (NVIDIA) | parakeet-tdt-0.6b-v3, int8 | 25 European languages including English and Russian, told apart per phrase |
+| GigaAM v3 (Sber) | v3 e2e CTC, int8 | Russian, with punctuation |
 
 Tokativ targets niri. Any compositor with `wlr-layer-shell` and the input method or virtual
 keyboard protocols should work. GNOME and X11 are not supported.
@@ -36,7 +37,7 @@ The module installs the package and runs `tokativ daemon` as a systemd user serv
 `graphical-session.target`. Without Home Manager, `nix run github:nolight132/tokativ` starts the
 daemon. Any CLI command that opens something starts it too if it is not running yet.
 
-On first run a setup window downloads the models (about 670 MB for Parakeet and 225 MB for
+On first run a setup window downloads the model you pick (about 670 MB for Parakeet, 225 MB for
 GigaAM) into `$XDG_DATA_HOME/tokativ/models`, lets you pick a microphone, and gives you a field
 to try dictating into.
 
@@ -70,7 +71,7 @@ tokativ toggle          start, or finish the running session
 tokativ start | stop    start, or finish
 tokativ confirm         finish and insert the rest
 tokativ cancel          drop what is not inserted and close the pill
-tokativ lang auto|ru    language mode for the next session
+tokativ model <id>      switch to parakeet or gigaam
 tokativ settings        open the settings window
 tokativ quit            stop the daemon
 ```
@@ -101,14 +102,10 @@ the daemon reloads it whenever it changes, whoever wrote it. Every key is option
 
 ```toml
 # input_device = "..."          # a device id picked in settings, omit for the default
-language = "auto"               # or "russian": the mode sessions start in
+model = "parakeet"              # or "gigaam"
 launch_at_login = false         # writes an XDG autostart entry
 tray = true
 live_preview = true            # draft text at the cursor while speaking
-
-[engines]
-auto = "parakeet"
-russian = "gigaam"
 
 [vad]
 silence_ms = 500                # the pause that ends a phrase
