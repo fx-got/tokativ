@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
-use tokativ_config::{Config, LanguageMode, socket_path};
+use tokativ_config::{Config, Model, socket_path};
 
 use crate::ipc::Command;
 
@@ -42,10 +42,10 @@ enum Verb {
     Confirm,
     /// Discard what is not inserted yet and close the pill
     Cancel,
-    /// Pick the language mode for the next session
-    Lang {
-        #[arg(value_parser = ["auto", "ru"])]
-        mode: String,
+    /// Switch the model sessions dictate with
+    Model {
+        #[arg(value_parser = Model::ALL.map(Model::id))]
+        model: String,
     },
     /// Open the settings window
     Settings,
@@ -80,8 +80,8 @@ fn command(verb: Verb) -> Command {
         Verb::Stop => Command::Stop,
         Verb::Confirm => Command::Confirm,
         Verb::Cancel => Command::Cancel,
-        Verb::Lang { mode } => {
-            Command::Lang(LanguageMode::from_id(&mode).expect("clap checked the mode"))
+        Verb::Model { model } => {
+            Command::Model(Model::from_id(&model).expect("clap checked the model"))
         }
         Verb::Settings => Command::Settings,
         Verb::Quit => Command::Quit,

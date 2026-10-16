@@ -10,18 +10,20 @@ use serde::{Deserialize, Serialize};
 
 pub const APP_ID: &str = "tokativ";
 
-/// Which transcription model a session uses.
+/// A speech model the app can download and dictate with. Adding one takes a variant here, its
+/// files in the engine crate's catalog and an `Engine` implementation there.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum EngineKind {
+pub enum Model {
     #[default]
     Parakeet,
     Gigaam,
 }
 
-impl EngineKind {
+impl Model {
     pub const ALL: [Self; 2] = [Self::Parakeet, Self::Gigaam];
 
+    /// The short name the config, the CLI and the model folder use.
     pub fn id(self) -> &'static str {
         match self {
             Self::Parakeet => "parakeet",
@@ -30,49 +32,41 @@ impl EngineKind {
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.id() == id)
+        Self::ALL.into_iter().find(|model| model.id() == id)
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Parakeet => "Parakeet TDT 0.6B v3",
+            Self::Parakeet => "Parakeet v3",
             Self::Gigaam => "GigaAM v3",
         }
     }
-}
 
-/// The language a session is dictated in. Each mode maps to an engine in [`Engines`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LanguageMode {
-    #[default]
-    Auto,
-    Russian,
-}
-
-impl LanguageMode {
-    pub const ALL: [Self; 2] = [Self::Auto, Self::Russian];
-
-    /// The short name the CLI and IPC use, `auto` or `ru`.
-    pub fn id(self) -> &'static str {
+    pub fn maker(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
-            Self::Russian => "ru",
+            Self::Parakeet => "NVIDIA",
+            Self::Gigaam => "Sber",
         }
     }
 
-    pub fn from_id(id: &str) -> Option<Self> {
-        match id {
-            "auto" => Some(Self::Auto),
-            "ru" | "russian" => Some(Self::Russian),
-            _ => None,
+    /// One line on what the model is good at, for choosing between them.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Parakeet => {
+                "25 European languages, English and Russian among them. Tells them apart on its own."
+            }
+            Self::Gigaam => "Russian only, punctuated. The most accurate for Russian speech.",
         }
     }
 
-    pub fn name(self) -> &'static str {
+    /// The languages it transcribes, as ISO 639-1 codes.
+    pub fn languages(self) -> &'static [&'static str] {
         match self {
-            Self::Auto => "Auto",
-            Self::Russian => "Russian",
+            Self::Parakeet => &[
+                "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt",
+                "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
+            ],
+            Self::Gigaam => &["ru"],
         }
     }
 }
@@ -127,13 +121,12 @@ impl PillEdge {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
     /// The capture device by its CPAL name. `None` follows the system default.
     pub input_device: Option<String>,
-    /// The mode a session starts in until the hotkey or the tray picks another.
-    pub language: LanguageMode,
-    pub engines: Engines,
+    /// The model sessions dictate with.
+    pub model: Model,
     pub vad: Vad,
     pub insertion: Insertion,
     pub pill: Pill,
@@ -149,8 +142,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             input_device: None,
-            language: LanguageMode::Auto,
-            engines: Engines::default(),
+            model: Model::Parakeet,
             vad: Vad::default(),
             insertion: Insertion::default(),
             pill: Pill::default(),
@@ -162,34 +154,9 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Engines {
-    pub auto: EngineKind,
-    pub russian: EngineKind,
-}
-
-impl Default for Engines {
-    fn default() -> Self {
-        Self {
-            auto: EngineKind::Parakeet,
-            russian: EngineKind::Gigaam,
-        }
-    }
-}
-
-impl Engines {
-    pub fn for_mode(&self, mode: LanguageMode) -> EngineKind {
-        match mode {
-            LanguageMode::Auto => self.auto,
-            LanguageMode::Russian => self.russian,
-        }
-    }
-}
-
 /// How speech is cut into the segments that get transcribed one at a time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Vad {
     /// The silence in milliseconds that ends a segment.
     pub silence_ms: u32,
@@ -213,7 +180,7 @@ impl Default for Vad {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Insertion {
     pub backend: Backend,
     /// App ids that paste with Ctrl+Shift+V instead of Ctrl+V.
@@ -244,7 +211,7 @@ impl Default for Insertion {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Pill {
     pub edge: PillEdge,
     /// The gap in logical pixels between the pill and the edge of the output.
@@ -261,7 +228,7 @@ impl Default for Pill {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Models {
     /// Minutes without a session after which loaded models are dropped. Zero keeps them loaded.
     pub unload_after_minutes: u32,
@@ -340,10 +307,17 @@ mod tests {
     }
 
     #[test]
+    fn keys_from_older_versions_are_ignored() {
+        let config: Config =
+            toml::from_str("language = \"auto\"\n[engines]\nauto = \"parakeet\"\n").unwrap();
+        assert_eq!(config.model, Model::Parakeet);
+    }
+
+    #[test]
     fn partial_file_fills_defaults() {
         let config: Config =
-            toml::from_str("language = \"russian\"\n[vad]\nsilence_ms = 700\n").unwrap();
-        assert_eq!(config.language, LanguageMode::Russian);
+            toml::from_str("model = \"gigaam\"\n[vad]\nsilence_ms = 700\n").unwrap();
+        assert_eq!(config.model, Model::Gigaam);
         assert_eq!(config.vad.silence_ms, 700);
         assert_eq!(config.vad.max_segment_s, 20);
     }

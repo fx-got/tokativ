@@ -1,11 +1,11 @@
 //! The StatusNotifierItem in the panel, through ksni. Menu clicks travel to the daemon over a
-//! channel, and the daemon pushes the recording state and language mode back.
+//! channel, and the daemon pushes the recording state and the models back.
 
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use ksni::blocking::{Handle, TrayMethods as _};
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem};
-use tokativ_config::{APP_ID, LanguageMode};
+use tokativ_config::{APP_ID, Model};
 
 const SIZE: i32 = 32;
 
@@ -13,9 +13,16 @@ const SIZE: i32 = 32;
 #[derive(Clone, Copy, Debug)]
 pub enum TrayEvent {
     Toggle,
-    Lang(LanguageMode),
+    Model(Model),
     Settings,
     Quit,
+}
+
+/// The models as the tray menu lists them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shown {
+    pub model: Model,
+    pub installed: Vec<Model>,
 }
 
 /// The running tray item. Dropping it removes the item from the panel.
@@ -27,12 +34,12 @@ impl Tray {
     pub fn spawn(
         events: UnboundedSender<TrayEvent>,
         recording: bool,
-        mode: LanguageMode,
+        shown: Shown,
     ) -> Result<Self> {
         let item = Item {
             events,
             recording,
-            mode,
+            shown,
         };
         let handle = item
             .spawn()
@@ -40,10 +47,10 @@ impl Tray {
         Ok(Self { handle })
     }
 
-    pub fn show(&self, recording: bool, mode: LanguageMode) {
+    pub fn show(&self, recording: bool, shown: Shown) {
         self.handle.update(|item| {
             item.recording = recording;
-            item.mode = mode;
+            item.shown = shown;
         });
     }
 }
@@ -57,7 +64,7 @@ impl Drop for Tray {
 struct Item {
     events: UnboundedSender<TrayEvent>,
     recording: bool,
-    mode: LanguageMode,
+    shown: Shown,
 }
 
 impl Item {
@@ -104,7 +111,7 @@ impl ksni::Tray for Item {
             title: "Tokativ".into(),
             description: match self.recording {
                 true => "Dictating".into(),
-                false => format!("Ready, {}", self.mode.name()),
+                false => format!("Ready, {}", self.shown.model.name()),
             },
             ..Default::default()
         }
@@ -123,21 +130,28 @@ impl ksni::Tray for Item {
             Self::entry(toggle, TrayEvent::Toggle),
             MenuItem::Separator,
             RadioGroup {
-                selected: LanguageMode::ALL
+                selected: Model::ALL
                     .iter()
-                    .position(|mode| *mode == self.mode)
+                    .position(|model| *model == self.shown.model)
                     .unwrap_or(0),
                 select: Box::new(|item: &mut Self, index| {
-                    if let Some(mode) = LanguageMode::ALL.get(index) {
-                        item.mode = *mode;
-                        item.send(TrayEvent::Lang(*mode));
+                    if let Some(model) = Model::ALL.get(index) {
+                        item.shown.model = *model;
+                        item.send(TrayEvent::Model(*model));
                     }
                 }),
-                options: LanguageMode::ALL
+                options: Model::ALL
                     .iter()
-                    .map(|mode| RadioItem {
-                        label: mode.name().into(),
-                        ..Default::default()
+                    .map(|model| {
+                        let installed = self.shown.installed.contains(model);
+                        RadioItem {
+                            label: match installed {
+                                true => model.name().into(),
+                                false => format!("{} (not downloaded)", model.name()),
+                            },
+                            enabled: installed,
+                            ..Default::default()
+                        }
                     })
                     .collect(),
             }

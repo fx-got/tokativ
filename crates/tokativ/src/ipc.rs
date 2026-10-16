@@ -8,7 +8,7 @@ use std::time::Duration;
 use std::{fs, thread};
 
 use anyhow::{Context as _, Result, bail};
-use tokativ_config::LanguageMode;
+use tokativ_config::Model;
 
 /// What a client can ask the daemon to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub enum Command {
     Stop,
     Confirm,
     Cancel,
-    Lang(LanguageMode),
+    Model(Model),
     Settings,
     Quit,
     Ping,
@@ -36,9 +36,8 @@ impl Command {
             (Some("settings"), None) => Self::Settings,
             (Some("quit"), None) => Self::Quit,
             (Some("ping"), None) => Self::Ping,
-            (Some("lang"), Some(mode)) => Self::Lang(
-                LanguageMode::from_id(mode)
-                    .with_context(|| format!("unknown language mode {mode:?}"))?,
+            (Some("model"), Some(model)) => Self::Model(
+                Model::from_id(model).with_context(|| format!("unknown model {model:?}"))?,
             ),
             _ => bail!("unknown command {line:?}"),
         };
@@ -55,7 +54,7 @@ impl Command {
             Self::Stop => "stop".into(),
             Self::Confirm => "confirm".into(),
             Self::Cancel => "cancel".into(),
-            Self::Lang(mode) => format!("lang {}", mode.id()),
+            Self::Model(model) => format!("model {}", model.id()),
             Self::Settings => "settings".into(),
             Self::Quit => "quit".into(),
             Self::Ping => "ping".into(),
@@ -137,15 +136,15 @@ mod tests {
             Command::Stop,
             Command::Confirm,
             Command::Cancel,
-            Command::Lang(LanguageMode::Auto),
-            Command::Lang(LanguageMode::Russian),
+            Command::Model(Model::Parakeet),
+            Command::Model(Model::Gigaam),
             Command::Settings,
             Command::Quit,
             Command::Ping,
         ] {
             assert_eq!(Command::parse(&command.line()).unwrap(), command);
         }
-        assert!(Command::parse("lang de").is_err());
+        assert!(Command::parse("model whisper").is_err());
         assert!(Command::parse("toggle now").is_err());
     }
 }

@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
-use tokativ_config::EngineKind;
+use tokativ_config::Model;
 use transcribe_rs::onnx::Quantization;
 use transcribe_rs::onnx::gigaam::GigaAMModel;
 use transcribe_rs::onnx::parakeet::ParakeetModel;
@@ -83,7 +83,7 @@ impl Engine for GigaAm {
 }
 
 /// Loads the engine of `kind` from its installed folder.
-pub fn load(kind: EngineKind) -> Result<Box<dyn Engine>> {
+pub fn load(kind: Model) -> Result<Box<dyn Engine>> {
     static CPU: Once = Once::new();
     CPU.call_once(|| transcribe_rs::set_ort_accelerator(OrtAccelerator::CpuOnly));
     if models::installed(kind).is_none() {
@@ -92,8 +92,8 @@ pub fn load(kind: EngineKind) -> Result<Box<dyn Engine>> {
     let dir = models::dir(kind);
     let started = Instant::now();
     let engine: Box<dyn Engine> = match kind {
-        EngineKind::Parakeet => Box::new(Parakeet::load(&dir)?),
-        EngineKind::Gigaam => Box::new(GigaAm::load(&dir)?),
+        Model::Parakeet => Box::new(Parakeet::load(&dir)?),
+        Model::Gigaam => Box::new(GigaAm::load(&dir)?),
     };
     log::info!(
         "engine: loaded {} in {:.1?}",
@@ -106,9 +106,9 @@ pub fn load(kind: EngineKind) -> Result<Box<dyn Engine>> {
 type Reply = Box<dyn FnOnce(Result<String>) + Send>;
 
 enum Job {
-    Preload(EngineKind),
+    Preload(Model),
     Transcribe {
-        kind: EngineKind,
+        kind: Model,
         samples: Vec<f32>,
         reply: Reply,
     },
@@ -130,7 +130,7 @@ pub struct Transcriber {
 /// A transcription whose result is only shown, never kept. Only the newest one waits, so drafts
 /// never pile up behind a slow model.
 struct Draft {
-    kind: EngineKind,
+    kind: Model,
     samples: Vec<f32>,
     reply: Reply,
 }
@@ -148,14 +148,14 @@ impl Transcriber {
     }
 
     /// Loads `kind` ahead of the first segment, so the first result is not held up by it.
-    pub fn preload(&self, kind: EngineKind) {
+    pub fn preload(&self, kind: Model) {
         self.jobs.send(Job::Preload(kind)).ok();
     }
 
     /// Queues `samples` for transcription with `kind`. `reply` runs on the worker thread.
     pub fn transcribe(
         &self,
-        kind: EngineKind,
+        kind: Model,
         samples: Vec<f32>,
         reply: impl FnOnce(Result<String>) + Send + 'static,
     ) {
@@ -174,7 +174,7 @@ impl Transcriber {
     /// `reply` never runs.
     pub fn draft(
         &self,
-        kind: EngineKind,
+        kind: Model,
         samples: Vec<f32>,
         reply: impl FnOnce(Result<String>) + Send + 'static,
     ) {
@@ -192,7 +192,7 @@ impl Transcriber {
 }
 
 fn work(jobs: Receiver<Job>, drafts: Arc<Mutex<Option<Draft>>>, mut idle: Option<Duration>) {
-    let mut loaded: HashMap<EngineKind, Box<dyn Engine>> = HashMap::new();
+    let mut loaded: HashMap<Model, Box<dyn Engine>> = HashMap::new();
     let mut last = Instant::now();
     loop {
         let wait = match (idle, loaded.is_empty()) {
@@ -246,8 +246,8 @@ fn work(jobs: Receiver<Job>, drafts: Arc<Mutex<Option<Draft>>>, mut idle: Option
 }
 
 fn engine(
-    loaded: &mut HashMap<EngineKind, Box<dyn Engine>>,
-    kind: EngineKind,
+    loaded: &mut HashMap<Model, Box<dyn Engine>>,
+    kind: Model,
 ) -> Result<&mut Box<dyn Engine>> {
     match loaded.entry(kind) {
         Entry::Occupied(entry) => Ok(entry.into_mut()),

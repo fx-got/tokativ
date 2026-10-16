@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, Global};
-use tokativ_config::{Config, EngineKind, LanguageMode};
+use tokativ_config::{Config, Model};
 use tokativ_engine::models;
 
 /// What a window asks the daemon to do.
@@ -106,7 +106,6 @@ pub struct Status {
     /// Why the method is not the one asked for, when it is not.
     pub note: Option<String>,
     pub recording: bool,
-    pub mode: LanguageMode,
 }
 
 /// Where one model stands on disk.
@@ -121,8 +120,8 @@ pub enum ModelState {
 /// The downloadable models and their state. Downloads run on their own threads and report
 /// progress here.
 pub struct Library {
-    states: HashMap<EngineKind, ModelState>,
-    cancels: HashMap<EngineKind, Arc<AtomicBool>>,
+    states: HashMap<Model, ModelState>,
+    cancels: HashMap<Model, Arc<AtomicBool>>,
 }
 
 const PROGRESS_TICK: Duration = Duration::from_millis(120);
@@ -137,23 +136,23 @@ impl Library {
         library
     }
 
-    pub fn state(&self, kind: EngineKind) -> ModelState {
+    pub fn state(&self, kind: Model) -> ModelState {
         self.states
             .get(&kind)
             .cloned()
             .unwrap_or(ModelState::Missing)
     }
 
-    pub fn installed(&self, kind: EngineKind) -> bool {
+    pub fn installed(&self, kind: Model) -> bool {
         matches!(self.state(kind), ModelState::Installed { .. })
     }
 
     pub fn any_installed(&self) -> bool {
-        EngineKind::ALL.into_iter().any(|kind| self.installed(kind))
+        Model::ALL.into_iter().any(|kind| self.installed(kind))
     }
 
     fn scan(&mut self) {
-        for kind in EngineKind::ALL {
+        for kind in Model::ALL {
             if matches!(self.state(kind), ModelState::Downloading { .. }) {
                 continue;
             }
@@ -165,7 +164,7 @@ impl Library {
         }
     }
 
-    pub fn download(&mut self, kind: EngineKind, cx: &mut Context<Self>) {
+    pub fn download(&mut self, kind: Model, cx: &mut Context<Self>) {
         if matches!(self.state(kind), ModelState::Downloading { .. }) {
             return;
         }
@@ -231,13 +230,13 @@ impl Library {
         .detach();
     }
 
-    pub fn cancel(&mut self, kind: EngineKind) {
+    pub fn cancel(&mut self, kind: Model) {
         if let Some(cancel) = self.cancels.get(&kind) {
             cancel.store(true, Ordering::Relaxed);
         }
     }
 
-    pub fn delete(&mut self, kind: EngineKind, cx: &mut Context<Self>) {
+    pub fn delete(&mut self, kind: Model, cx: &mut Context<Self>) {
         if let Err(error) = models::delete(kind) {
             log::error!("models: cannot delete {}: {error:#}", kind.id());
         }

@@ -7,14 +7,14 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use tokativ_audio::{Silero, Timing};
-use tokativ_config::EngineKind;
+use tokativ_config::Model;
 use tokativ_engine::Joiner;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let kind = args
         .next()
-        .and_then(|id| EngineKind::from_id(&id))
+        .and_then(|id| Model::from_id(&id))
         .context("first argument: parakeet or gigaam")?;
     let path = args.next().context("second argument: a wav file")?;
     let mut reader = hound::WavReader::open(&path)?;

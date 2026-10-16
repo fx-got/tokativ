@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
-use tokativ_config::{EngineKind, models_dir};
+use tokativ_config::{Model, models_dir};
 
 /// One file of a model: where it comes from, the name the engine loads it by, and what it must
 /// hash to.
@@ -63,26 +63,26 @@ const GIGAAM: &[Remote] = &[
 ];
 
 /// The files a model is made of.
-pub fn files(kind: EngineKind) -> &'static [Remote] {
+pub fn files(kind: Model) -> &'static [Remote] {
     match kind {
-        EngineKind::Parakeet => PARAKEET,
-        EngineKind::Gigaam => GIGAAM,
+        Model::Parakeet => PARAKEET,
+        Model::Gigaam => GIGAAM,
     }
 }
 
 /// The download size of a model in bytes.
-pub fn download_size(kind: EngineKind) -> u64 {
+pub fn download_size(kind: Model) -> u64 {
     files(kind).iter().map(|file| file.size).sum()
 }
 
 /// The folder a model is loaded from.
-pub fn dir(kind: EngineKind) -> PathBuf {
+pub fn dir(kind: Model) -> PathBuf {
     models_dir().join(kind.id())
 }
 
 /// The bytes a model takes on disk when all its files are present, or `None` when any is
 /// missing or the wrong size.
-pub fn installed(kind: EngineKind) -> Option<u64> {
+pub fn installed(kind: Model) -> Option<u64> {
     let dir = dir(kind);
     files(kind).iter().try_fold(0, |total, file| {
         let size = fs::metadata(dir.join(file.name)).ok()?.len();
@@ -91,7 +91,7 @@ pub fn installed(kind: EngineKind) -> Option<u64> {
 }
 
 /// Removes a model's folder.
-pub fn delete(kind: EngineKind) -> Result<()> {
+pub fn delete(kind: Model) -> Result<()> {
     let dir = dir(kind);
     match fs::remove_dir_all(&dir) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
@@ -117,7 +117,7 @@ impl std::error::Error for Cancelled {}
 /// place. `progress` gets the bytes done and the total as they arrive. Setting `cancel` stops
 /// the download with [`Cancelled`] and leaves the staging folder for the next attempt to
 /// overwrite. Blocks, so call it from a thread of its own.
-pub fn download(kind: EngineKind, progress: &dyn Fn(u64, u64), cancel: &AtomicBool) -> Result<()> {
+pub fn download(kind: Model, progress: &dyn Fn(u64, u64), cancel: &AtomicBool) -> Result<()> {
     let target = dir(kind);
     let staging = target.with_extension("partial");
     fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;

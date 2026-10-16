@@ -7,8 +7,8 @@ use gpui::{
     App, ClipboardItem, Context, Entity, Global, SharedString, Size, Window, WindowHandle, div, px,
 };
 use tokativ_audio::{InputDevice, Recorder};
-use tokativ_config::EngineKind;
-use ui::{ActiveTheme as _, Button, Checkbox, Input, MenuItem, Picker, Popovers, Text};
+use tokativ_config::Model;
+use ui::{ActiveTheme as _, Button, Input, MenuItem, Picker, Popovers, Radio, Text};
 
 use crate::chrome::{self, meter, section};
 use crate::host::{Action, Host, Library, ModelState, Status, Store};
@@ -70,7 +70,6 @@ pub struct Setup {
     library: Entity<Library>,
     status: Entity<Status>,
     step: Step,
-    wanted: [bool; 2],
     popovers: Popovers,
     devices: Vec<InputDevice>,
     /// Feeds the level meter while the microphone step is shown.
@@ -95,7 +94,6 @@ impl Setup {
             library: host.library,
             status: host.status,
             step: Step::Models,
-            wanted: [true, false],
             popovers: Popovers::default(),
             devices: tokativ_audio::input_devices(),
             monitor: None,
@@ -143,74 +141,41 @@ impl Setup {
 
     fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let library = self.library.read(cx);
-        let states: Vec<(EngineKind, ModelState)> = EngineKind::ALL
+        let states: Vec<(Model, ModelState)> = Model::ALL
             .into_iter()
-            .map(|kind| (kind, library.state(kind)))
+            .map(|model| (model, library.state(model)))
             .collect();
-        let blurbs = [
-            "English, Russian and 23 more European languages, detected on the fly.",
-            "Russian only, with punctuation. Pick it if you dictate mostly in Russian.",
-        ];
-        let downloadable = states.iter().enumerate().any(|(index, (_, state))| {
-            self.wanted[index] && matches!(state, ModelState::Missing | ModelState::Failed(_))
-        });
+        let chosen = self.store.read(cx).config().model;
 
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(intro(
-                "Pick the speech models to download. They run on this computer and nothing you say leaves it.",
+                "Pick the model to dictate with. It runs on this computer and nothing you say leaves it. You can download another one later in settings.",
                 cx,
             ))
-            .children(states.into_iter().enumerate().map(|(index, (kind, state))| {
-                let wanted = self.wanted[index];
+            .children(states.into_iter().map(|(model, state)| {
+                let radio = Radio::new(
+                    SharedString::from(format!("pick-{}", model.id())),
+                    model == chosen,
+                )
+                .into_any_element();
                 div()
-                    .flex()
-                    .gap_3()
-                    .items_start()
-                    .child(
-                        div().pt_4().child(
-                            Checkbox::new(SharedString::from(format!("want-{}", kind.id())), wanted)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.wanted[index] = !this.wanted[index];
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(model_row(kind, state, &self.library, cx))
-                            .child(
-                                div()
-                                    .pb_2()
-                                    .text_size(cx.theme().text(Text::Small))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(blurbs[index]),
-                            ),
-                    )
+                    .id(SharedString::from(format!("setup-model-{}", model.id())))
+                    .cursor_pointer()
+                    .rounded(chrome::GROUP_RADIUS)
+                    .border_1()
+                    .border_color(match model == chosen {
+                        true => cx.theme().foreground.opacity(0.5),
+                        false => cx.theme().border.opacity(0.6),
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.store
+                            .update(cx, |store, cx| store.update(|config| config.model = model, cx));
+                    }))
+                    .child(model_row(model, state, &self.library, Some(radio), cx))
             }))
-            .child(
-                div().pt_2().child(
-                    Button::new("download-selected")
-                        .label("Download selected")
-                        .primary()
-                        .disabled(!downloadable)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            for (index, kind) in EngineKind::ALL.into_iter().enumerate() {
-                                if this.wanted[index] {
-                                    this.library.update(cx, |library, cx| {
-                                        if !library.installed(kind) {
-                                            library.download(kind, cx);
-                                        }
-                                    });
-                                }
-                            }
-                        })),
-                ),
-            )
     }
 
     fn microphone(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -328,7 +293,10 @@ impl Setup {
 
     fn can_advance(&self, cx: &App) -> bool {
         match self.step {
-            Step::Models => self.library.read(cx).any_installed(),
+            Step::Models => self
+                .library
+                .read(cx)
+                .installed(self.store.read(cx).config().model),
             _ => true,
         }
     }
