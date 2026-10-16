@@ -52,7 +52,6 @@ pub(crate) enum Request {
     Begin,
     Preedit(String),
     Insert { text: String, preedit: String },
-    Release,
     End,
     Terminals(Vec<String>),
 }
@@ -116,7 +115,7 @@ impl Inserter {
 
     /// Starts a dictation session. With the input method this binds it, so the focused text
     /// field can activate it before the first segment is ready, and takes the keyboard so Escape
-    /// and Enter reach the session. Any other key goes on to the app and hands the keyboard back.
+    /// and Enter reach the session until it ends. Every other key goes on to the focused app.
     pub fn begin(&self) {
         *self.before.lock().expect("before lock") = None;
         self.send(Request::Begin);
@@ -131,11 +130,6 @@ impl Inserter {
     /// Inserts `text` at the cursor and then shows `preedit` after it, which may be empty.
     pub fn insert(&self, text: String, preedit: String) {
         self.send(Request::Insert { text, preedit });
-    }
-
-    /// Hands the keyboard back to the apps while the session finishes.
-    pub fn release_keys(&self) {
-        self.send(Request::Release);
     }
 
     /// Ends the session and clears any placeholder.

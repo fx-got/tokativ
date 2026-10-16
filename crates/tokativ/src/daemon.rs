@@ -9,7 +9,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, KeyBinding, QuitMode, WindowHandle};
 use notify::{RecursiveMode, Watcher as _};
 use tokativ_audio::{Options, Recorder, Silero, SpeechDetector, Timing};
-use tokativ_config::{Config, EngineKind, LanguageMode, config_dir, config_path, socket_path};
+use tokativ_config::{Config, Model, config_dir, config_path, socket_path};
 use tokativ_engine::{Joiner, Transcriber};
 use tokativ_input::{Inserter, Key, Method};
 use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
@@ -17,7 +17,7 @@ use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
 use crate::assets::Assets;
 use crate::autostart;
 use crate::ipc::{self, Command};
-use crate::tray::{Tray, TrayEvent};
+use crate::tray::{Shown, Tray, TrayEvent};
 
 /// What sits at the cursor while a segment is transcribed and no draft of it is ready.
 const PLACEHOLDER: &str = "…";
@@ -48,7 +48,7 @@ enum Event {
 /// One press of the hotkey to the pill closing.
 struct Session {
     id: u64,
-    engine: EngineKind,
+    engine: Model,
     recorder: Option<Recorder>,
     pill: Option<WindowHandle<Pill>>,
     /// Created at the first insertion, once the input method may have reported the text
@@ -74,7 +74,6 @@ pub struct Daemon {
     library: Entity<Library>,
     status: Entity<Status>,
     applied: Config,
-    mode: LanguageMode,
     events: UnboundedSender<Event>,
     transcriber: Transcriber,
     inserter: Option<Inserter>,
@@ -157,7 +156,6 @@ impl Daemon {
                 store: store.clone(),
                 library: library.clone(),
                 status,
-                mode: config.language,
                 applied: config.clone(),
                 events,
                 transcriber,
@@ -176,7 +174,9 @@ impl Daemon {
                 },
             )
             .detach();
-            daemon.place_tray(config.tray);
+            cx.observe(&library, |this: &mut Self, _, cx| this.publish(cx))
+                .detach();
+            daemon.place_tray(config.tray, cx);
             daemon.publish(cx);
             daemon.preload(cx);
             daemon
@@ -205,7 +205,7 @@ impl Daemon {
         match event {
             Event::Command(command) => self.command(command, cx),
             Event::Tray(TrayEvent::Toggle) => self.toggle(cx),
-            Event::Tray(TrayEvent::Lang(mode)) => self.set_mode(mode, cx),
+            Event::Tray(TrayEvent::Model(model)) => self.set_model(model, cx),
             Event::Tray(TrayEvent::Settings) => self.open_settings(cx),
             Event::Tray(TrayEvent::Quit) => self.quit(cx),
             Event::Recorder { session, event } => self.recorded(session, event, cx),
@@ -231,7 +231,7 @@ impl Daemon {
             Command::Start => self.start(cx),
             Command::Stop | Command::Confirm => self.confirm(cx),
             Command::Cancel => self.cancel(cx),
-            Command::Lang(mode) => self.set_mode(mode, cx),
+            Command::Model(model) => self.set_model(model, cx),
             Command::Settings => self.open_settings(cx),
             Command::Quit => self.quit(cx),
             Command::Ping => {}
@@ -261,7 +261,7 @@ impl Daemon {
             return;
         }
         let config = self.store.read(cx).config().clone();
-        let engine = config.engines.for_mode(self.mode);
+        let engine = config.model;
         if !self.library.read(cx).installed(engine) {
             log::warn!("session: {} is not downloaded", engine.name());
             self.open_setup(cx);
@@ -371,9 +371,6 @@ impl Daemon {
         session.stopping = true;
         if let Some(recorder) = session.recorder.take() {
             recorder.stop();
-        }
-        if let Some(inserter) = &self.inserter {
-            inserter.release_keys();
         }
         if let Some(pill) = session.pill {
             set_phase(pill, Phase::Processing, cx);
@@ -542,21 +539,27 @@ impl Daemon {
         self.publish(cx);
     }
 
-    fn set_mode(&mut self, mode: LanguageMode, cx: &mut Context<Self>) {
-        self.mode = mode;
-        log::info!("mode: {}", mode.name());
-        let engine = self.store.read(cx).config().engines.for_mode(mode);
-        if self.library.read(cx).installed(engine) {
-            self.transcriber.preload(engine);
+    /// Switches the model sessions dictate with, keeping the choice in the config. A model that
+    /// is not downloaded opens the setup window instead.
+    fn set_model(&mut self, model: Model, cx: &mut Context<Self>) {
+        if !self.library.read(cx).installed(model) {
+            log::warn!("model: {} is not downloaded", model.name());
+            self.open_setup(cx);
+            return;
         }
-        self.publish(cx);
+        self.store.update(cx, |store, cx| {
+            store.update(|config| config.model = model, cx)
+        });
     }
 
     /// Applies a changed config. Session settings take effect from the next session.
     fn apply(&mut self, config: Config, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.applied, config.clone());
-        if old.language != config.language {
-            self.mode = config.language;
+        if old.model != config.model {
+            log::info!("model: {}", config.model.name());
+            if self.library.read(cx).installed(config.model) {
+                self.transcriber.preload(config.model);
+            }
         }
         if old.insertion.backend != config.insertion.backend {
             self.inserter = start_inserter(&config, &self.events);
@@ -566,7 +569,7 @@ impl Daemon {
             inserter.set_terminals(config.insertion.terminals.clone());
         }
         if old.tray != config.tray {
-            self.place_tray(config.tray);
+            self.place_tray(config.tray, cx);
         }
         if old.launch_at_login != config.launch_at_login
             && let Err(error) = autostart::apply(config.launch_at_login)
@@ -584,28 +587,40 @@ impl Daemon {
         if config.models.unload_after_minutes != 0 {
             return;
         }
-        let library = self.library.read(cx);
-        for mode in LanguageMode::ALL {
-            let engine = config.engines.for_mode(mode);
-            if library.installed(engine) {
-                self.transcriber.preload(engine);
-            }
+        if self.library.read(cx).installed(config.model) {
+            self.transcriber.preload(config.model);
         }
     }
 
-    fn place_tray(&mut self, shown: bool) {
-        self.tray = match shown {
+    fn place_tray(&mut self, placed: bool, cx: &App) {
+        self.tray = match placed {
             false => None,
-            true => Tray::spawn(self.tray_events.clone(), self.session.is_some(), self.mode)
-                .map_err(|error| log::warn!("tray: {error:#}"))
-                .ok(),
+            true => Tray::spawn(
+                self.tray_events.clone(),
+                self.session.is_some(),
+                self.shown(cx),
+            )
+            .map_err(|error| log::warn!("tray: {error:#}"))
+            .ok(),
         };
+    }
+
+    /// The models as the tray lists them.
+    fn shown(&self, cx: &App) -> Shown {
+        let library = self.library.read(cx);
+        Shown {
+            model: self.store.read(cx).config().model,
+            installed: Model::ALL
+                .into_iter()
+                .filter(|model| library.installed(*model))
+                .collect(),
+        }
     }
 
     /// Pushes the daemon's state to the windows and the tray.
     fn publish(&mut self, cx: &mut Context<Self>) {
         let recording = self.session.is_some();
-        let mode = self.mode;
+        let shown = self.shown(cx);
         let (method, note) = match &self.inserter {
             Some(inserter) => {
                 let status = inserter.status();
@@ -621,12 +636,11 @@ impl Daemon {
                 method,
                 note,
                 recording,
-                mode,
             };
             cx.notify();
         });
         if let Some(tray) = &self.tray {
-            tray.show(recording, mode);
+            tray.show(recording, shown);
         }
     }
 

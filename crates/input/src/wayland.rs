@@ -1,9 +1,10 @@
 //! The insertion worker: one Wayland connection that drives the input method and the virtual
 //! keyboard on behalf of [`crate::Inserter`].
 
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Write as _};
-use std::os::fd::{AsFd as _, OwnedFd};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::os::fd::AsFd as _;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,11 +45,12 @@ const TICK: Duration = Duration::from_millis(10);
 const KEY_ESC: u32 = 1;
 const KEY_ENTER: u32 = 28;
 const KEY_KPENTER: u32 = 96;
-/// Keys that only change modifiers. Pressing one leaves the grab alone, so the Super still held
-/// from the hotkey or a Shift on its own does not hand the keyboard back.
-const MODIFIER_KEYS: [u32; 9] = [29, 97, 42, 54, 56, 100, 125, 126, 58];
 /// Shift, Ctrl, Alt and Super in the masks a keymap built from `complete` uses.
 const SHORTCUT_MODS: u32 = 1 | 4 | 8 | 64;
+/// How long a forwarded key may take to come back through the grab before it counts as a new
+/// press. Compositors that route virtual keys through the seat echo them within a millisecond or
+/// two, and no one presses a key twice this fast.
+const ECHO: Duration = Duration::from_millis(50);
 
 /// The protocol state the dispatch callbacks write into.
 struct State {
@@ -60,12 +62,16 @@ struct State {
     unavailable: bool,
     before: Arc<Mutex<Option<String>>>,
     keys: KeyHandler,
-    /// The seat keymap the grab reported, to forward keys with.
-    keymap: Option<(OwnedFd, u32)>,
-    /// Depressed, latched and locked modifiers and the layout group, as the grab last saw them.
-    mods: [u32; 4],
-    /// A key pressed under the grab that belongs to the app, waiting for the worker to forward.
-    passthrough: Option<(u32, u32)>,
+    /// Passes every key the session does not answer to on to the focused app, with the seat's
+    /// own keymap and modifiers. It exists only while the keyboard is grabbed.
+    forward: Option<ZwpVirtualKeyboardV1>,
+    /// Depressed modifiers as the grab last saw them.
+    depressed: u32,
+    /// Escape or Enter presses the session took, whose releases the app must not see either.
+    swallowed: Vec<u32>,
+    /// Recently forwarded keys and when, so one that comes back through the grab is not
+    /// forwarded again.
+    echoes: VecDeque<(u32, bool, Instant)>,
 }
 
 pub(crate) type KeyHandler = Box<dyn Fn(Key) + Send>;
@@ -106,14 +112,25 @@ pub(crate) fn run(
         }
     };
     loop {
-        let request = match requests.recv_timeout(TICK) {
-            Ok(request) => Some(request),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return,
+        // While the keyboard is grabbed every key passes through here, so the worker waits on
+        // the compositor rather than on requests, to forward keys without delay.
+        let grabbed = worker.grab.is_some();
+        let request = match grabbed {
+            true => match requests.try_recv() {
+                Ok(request) => Some(request),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => return,
+            },
+            false => match requests.recv_timeout(TICK) {
+                Ok(request) => Some(request),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
         };
-        let handled = match request {
-            Some(request) => worker.handle(request),
-            None => worker.pump(Duration::ZERO),
+        let handled = match (request, grabbed) {
+            (Some(request), _) => worker.handle(request),
+            (None, true) => worker.pump(TICK),
+            (None, false) => worker.pump(Duration::ZERO),
         };
         if let Err(error) = handled {
             log::error!("insert: {error:#}");
@@ -157,9 +174,10 @@ impl Worker {
                 unavailable: false,
                 before,
                 keys,
-                keymap: None,
-                mods: [0; 4],
-                passthrough: None,
+                forward: None,
+                depressed: 0,
+                swallowed: Vec::new(),
+                echoes: VecDeque::new(),
             },
             seat,
             input_methods,
@@ -179,7 +197,6 @@ impl Worker {
             Request::Begin => self.begin(),
             Request::Preedit(text) => self.preedit(&text),
             Request::Insert { text, preedit } => self.insert(&text, &preedit),
-            Request::Release => self.release(),
             Request::End => self.end(),
             Request::Terminals(terminals) => {
                 self.terminals = terminals;
@@ -202,10 +219,8 @@ impl Worker {
         self.state.serial = 0;
         self.state.unavailable = false;
         let input_method = manager.get_input_method(&self.seat, &self.handle, ());
-        self.state.keymap = None;
-        self.state.passthrough = None;
-        self.grab = Some(input_method.grab_keyboard(&self.handle, ()));
         self.input_method = Some(input_method);
+        self.grab_keys();
         self.pump(Duration::ZERO)
     }
 
@@ -261,11 +276,9 @@ impl Worker {
             return self.pump(Duration::ZERO);
         }
         log::debug!("insert: {} bytes, no active input method", text.len());
-        // Virtual keys must not land in the grab, where they would come straight back.
-        self.release()?;
         match (self.method, self.keyboards.is_some()) {
-            (Method::Clipboard, true) => self.paste(text),
-            (_, true) => self.type_text(text),
+            (Method::Clipboard, true) => self.ungrabbed(|worker| worker.paste(text)),
+            (_, true) => self.ungrabbed(|worker| worker.type_text(text)),
             (_, false) => {
                 clipboard::offer(text)?;
                 log::warn!("insert: no way to send keys, the text is on the clipboard");
@@ -275,9 +288,7 @@ impl Worker {
     }
 
     fn end(&mut self) -> Result<()> {
-        if let Some(grab) = self.grab.take() {
-            grab.release();
-        }
+        self.ungrab_keys();
         let Some(input_method) = self.input_method.take() else {
             return Ok(());
         };
@@ -294,34 +305,42 @@ impl Worker {
         Ok(())
     }
 
-    /// Hands the keyboard back to the apps for the rest of the session.
-    fn release(&mut self) -> Result<()> {
-        if let Some(grab) = self.grab.take() {
-            grab.release();
-            self.pump(Duration::ZERO)?;
+    /// Takes the keyboard for the session, so Escape and Enter reach it in any app. Every other
+    /// key goes on to the focused app through a virtual keyboard. Without the virtual keyboard
+    /// protocol nothing could go on, so the keyboard is left alone.
+    fn grab_keys(&mut self) {
+        let (Some(input_method), Some(keyboards)) = (&self.input_method, &self.keyboards) else {
+            return;
+        };
+        if self.grab.is_some() {
+            return;
         }
-        Ok(())
+        self.state.forward = Some(keyboards.create_virtual_keyboard(&self.seat, &self.handle, ()));
+        self.state.depressed = 0;
+        self.state.swallowed.clear();
+        self.state.echoes.clear();
+        self.grab = Some(input_method.grab_keyboard(&self.handle, ()));
     }
 
-    /// Sends a key pressed under the grab on to the focused app and releases the grab, so typing
-    /// by hand during a session behaves as if Tokativ were not there. The key's release then
-    /// reaches the app the usual way.
-    fn forward(&mut self, key: u32, time: u32) -> Result<()> {
-        let keymap = self
-            .state
-            .keymap
-            .as_ref()
-            .map(|(fd, size)| fd.try_clone().map(|fd| (fd, *size)))
-            .transpose()?;
-        if let (Some((fd, size)), Some(manager)) = (keymap, &self.keyboards) {
-            let keyboard = manager.create_virtual_keyboard(&self.seat, &self.handle, ());
-            keyboard.keymap(KeymapFormat::XkbV1.into(), fd.as_fd(), size);
-            let [depressed, latched, locked, group] = self.state.mods;
-            keyboard.modifiers(depressed, latched, locked, group);
-            keyboard.key(time, key, KeyState::Pressed.into());
-            keyboard.destroy();
+    fn ungrab_keys(&mut self) {
+        if let Some(grab) = self.grab.take() {
+            grab.release();
         }
-        self.release()
+        if let Some(forward) = self.state.forward.take() {
+            forward.destroy();
+        }
+    }
+
+    /// Runs `send` with the keyboard handed back for its duration. Compositors that route virtual
+    /// keys through the seat would otherwise deliver the typed text to the grab.
+    fn ungrabbed(&mut self, send: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        let grabbed = self.grab.is_some();
+        self.ungrab_keys();
+        let result = send(self);
+        if grabbed {
+            self.grab_keys();
+        }
+        result
     }
 
     /// Types `text` through a fresh virtual keyboard whose keymap holds exactly the characters
@@ -447,9 +466,8 @@ impl Worker {
             }
         }
         self.queue.dispatch_pending(&mut self.state)?;
-        if let Some((key, time)) = self.state.passthrough.take() {
-            self.forward(key, time)?;
-        }
+        // Keys forwarded by the dispatch callbacks go out now rather than at the next tick.
+        self.connection.flush()?;
         Ok(())
     }
 }
@@ -561,7 +579,9 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for State {
     ) {
         match event {
             zwp_input_method_keyboard_grab_v2::Event::Keymap { fd, size, .. } => {
-                state.keymap = Some((fd, size));
+                if let Some(forward) = &state.forward {
+                    forward.keymap(KeymapFormat::XkbV1.into(), fd.as_fd(), size);
+                }
             }
             zwp_input_method_keyboard_grab_v2::Event::Modifiers {
                 mods_depressed,
@@ -569,22 +589,68 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for State {
                 mods_locked,
                 group,
                 ..
-            } => state.mods = [mods_depressed, mods_latched, mods_locked, group],
-            zwp_input_method_keyboard_grab_v2::Event::Key {
-                key,
-                state: WEnum::Value(KeyState::Pressed),
-                time,
-                ..
             } => {
-                let plain = state.mods[0] & SHORTCUT_MODS == 0;
-                match key {
-                    KEY_ESC if plain => (state.keys)(Key::Escape),
-                    KEY_ENTER | KEY_KPENTER if plain => (state.keys)(Key::Enter),
-                    key if MODIFIER_KEYS.contains(&key) => {}
-                    key => state.passthrough = Some((key, time)),
+                state.depressed = mods_depressed;
+                if let Some(forward) = &state.forward {
+                    forward.modifiers(mods_depressed, mods_latched, mods_locked, group);
                 }
             }
+            zwp_input_method_keyboard_grab_v2::Event::Key {
+                key,
+                state: WEnum::Value(pressed),
+                time,
+                ..
+            } => state.key(key, pressed == KeyState::Pressed, time),
             _ => {}
+        }
+    }
+}
+
+impl State {
+    /// Takes Escape and Enter, when no shortcut modifier is held, and passes every other key on.
+    fn key(&mut self, key: u32, pressed: bool, time: u32) {
+        let now = Instant::now();
+        while self
+            .echoes
+            .front()
+            .is_some_and(|(_, _, at)| now.duration_since(*at) > ECHO)
+        {
+            self.echoes.pop_front();
+        }
+        if let Some(echo) = self
+            .echoes
+            .iter()
+            .position(|(sent, down, _)| *sent == key && *down == pressed)
+        {
+            self.echoes.remove(echo);
+            return;
+        }
+
+        let plain = self.depressed & SHORTCUT_MODS == 0;
+        let ours = match key {
+            KEY_ESC => Some(Key::Escape),
+            KEY_ENTER | KEY_KPENTER => Some(Key::Enter),
+            _ => None,
+        };
+        match (ours, pressed) {
+            (Some(ours), true) if plain => {
+                self.swallowed.push(key);
+                (self.keys)(ours);
+                return;
+            }
+            (Some(_), false) if self.swallowed.contains(&key) => {
+                self.swallowed.retain(|swallowed| *swallowed != key);
+                return;
+            }
+            _ => {}
+        }
+        if let Some(forward) = &self.forward {
+            let state = match pressed {
+                true => KeyState::Pressed,
+                false => KeyState::Released,
+            };
+            forward.key(time, key, state.into());
+            self.echoes.push_back((key, pressed, now));
         }
     }
 }
