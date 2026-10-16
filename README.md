@@ -51,10 +51,16 @@ binds {
 }
 ```
 
-The first press opens the pill and starts listening. Each time you pause for about half a second,
-the phrase you just said is transcribed and inserted. The second press, or the check mark on the
-pill, inserts whatever is left and closes it. Cancel drops anything not yet inserted. Text that
-has already gone in stays.
+The first press opens the pill and starts listening. While you speak, a draft of the current
+phrase shows at the cursor as underlined text. Each time you pause for about half a second, the
+phrase is transcribed in full and inserted. The second press, Enter, or the check mark on the pill
+inserts whatever is left and closes it. Escape, the cross, or `tokativ cancel` drop anything not
+yet inserted. Text that has already gone in stays.
+
+Escape and Enter work because the session takes the keyboard through the input method protocol.
+Any other key goes on to the app and hands the keyboard back, so typing by hand mid-session
+behaves normally. Drafts and the two keys need the input method, so they are off when another
+input method such as fcitx5 is running.
 
 ## Commands
 
@@ -98,6 +104,7 @@ the daemon reloads it whenever it changes, whoever wrote it. Every key is option
 language = "auto"               # or "russian": the mode sessions start in
 launch_at_login = false         # writes an XDG autostart entry
 tray = true
+live_preview = true            # draft text at the cursor while speaking
 
 [engines]
 auto = "parakeet"
