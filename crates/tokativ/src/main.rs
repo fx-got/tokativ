@@ -128,8 +128,19 @@ fn absent(error: &std::io::Error) -> bool {
     )
 }
 
-/// Starts the daemon in its own process group, so it outlives the compositor's spawn.
+/// Starts the daemon through its systemd user service when there is one, so it runs where the
+/// service manager can watch it. Otherwise starts it directly in its own process group, so it
+/// outlives the compositor's spawn.
 fn spawn_daemon() -> Result<()> {
+    let service = std::process::Command::new("systemctl")
+        .args(["--user", "start", "tokativ.service"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if service.is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
     let exe = std::env::current_exe().context("finding the running binary")?;
     std::process::Command::new(exe)
         .arg("daemon")
