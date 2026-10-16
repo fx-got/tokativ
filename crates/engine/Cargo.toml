@@ -1,0 +1,18 @@
+[package]
+name = "tokativ-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+ort.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+tokativ-config.workspace = true
+transcribe-rs.workspace = true
+
+[dev-dependencies]
+hound.workspace = true
+tokativ-audio.workspace = true
