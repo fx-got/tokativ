@@ -90,6 +90,32 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
             this.border_1().border_color(theme.border)
         })
         .overflow_hidden()
+        // Middle-button auto-scrolling, wired the way Sonora's root wires it: any press ends the
+        // mode, a held middle drag ends on release, Escape ends it, and the pointer steers it.
+        .capture_any_mouse_down(|_, window, cx| {
+            if ui::cancel_middle_scroll(cx) {
+                window.refresh();
+                cx.stop_propagation();
+            }
+        })
+        .capture_any_mouse_up(|event, window, cx| {
+            if event.button == MouseButton::Middle && ui::release_middle_scroll(event.position, cx)
+            {
+                window.refresh();
+            }
+        })
+        .on_mouse_up_out(MouseButton::Middle, |event, window, cx| {
+            if ui::release_middle_scroll(event.position, cx) {
+                window.refresh();
+            }
+        })
+        .capture_key_down(|event, window, cx| {
+            if event.keystroke.key == "escape" && ui::cancel_middle_scroll(cx) {
+                window.refresh();
+                cx.stop_propagation();
+            }
+        })
+        .on_mouse_move(|event, window, cx| ui::update_middle_scroll(event.position, window, cx))
         .child(title_bar)
         .child(div().flex_1().min_h_0().child(content))
         .child(WindowFrame::new())

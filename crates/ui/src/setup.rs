@@ -4,11 +4,14 @@
 use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, Global, SharedString, Size, Window, WindowHandle, div, px,
+    App, ClipboardItem, Context, Entity, Global, ScrollHandle, SharedString, Size, Window,
+    WindowHandle, div, px,
 };
 use tokativ_audio::{InputDevice, Recorder};
 use tokativ_config::Model;
-use ui::{ActiveTheme as _, Button, Input, MenuItem, Picker, Popovers, Radio, Text};
+use ui::{
+    ActiveTheme as _, Button, Input, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller, Text,
+};
 
 use crate::chrome::{self, meter, section};
 use crate::host::{Action, Host, Library, ModelState, Status, Store};
@@ -75,6 +78,7 @@ pub struct Setup {
     /// Feeds the level meter while the microphone step is shown.
     monitor: Option<Recorder>,
     field: Entity<Input>,
+    scrollbar: Entity<Scrollbar>,
 }
 
 impl Setup {
@@ -89,6 +93,7 @@ impl Setup {
         })
         .detach();
         let field = cx.new(|cx| Input::new("Your words appear here", cx));
+        let view = cx.entity_id();
         Self {
             store: host.store,
             library: host.library,
@@ -98,6 +103,7 @@ impl Setup {
             devices: tokativ_audio::input_devices(),
             monitor: None,
             field,
+            scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
         }
     }
 
@@ -393,11 +399,11 @@ impl Render for Setup {
             .child(steps)
             .child(
                 div()
-                    .id("setup-body")
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .child(body),
+                    .child(Scroller::new("setup-body", &self.scrollbar).child(body)),
             )
             .child(footer)
             .into_any_element();
