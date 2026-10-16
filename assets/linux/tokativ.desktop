@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Tokativ
+Comment=Local dictation for Wayland
+Exec=tokativ settings
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Accessibility;
