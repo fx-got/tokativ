@@ -1,0 +1,627 @@
+//! The background process: it owns the GPUI app, answers the control socket and the tray, and
+//! runs one dictation session at a time.
+
+use std::time::Duration;
+
+use anyhow::{Context as _, Result};
+use futures::StreamExt as _;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, KeyBinding, QuitMode, WindowHandle};
+use notify::{RecursiveMode, Watcher as _};
+use tokativ_audio::{Options, Recorder, Silero, SpeechDetector, Timing};
+use tokativ_config::{Config, EngineKind, LanguageMode, config_dir, config_path, socket_path};
+use tokativ_engine::{Joiner, Transcriber};
+use tokativ_input::Inserter;
+use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
+
+use crate::assets::Assets;
+use crate::autostart;
+use crate::ipc::{self, Command};
+use crate::tray::{Tray, TrayEvent};
+
+/// Everything that reaches the daemon from another thread.
+enum Event {
+    Command(Command),
+    Tray(TrayEvent),
+    Recorder {
+        session: u64,
+        event: tokativ_audio::Event,
+    },
+    Transcribed {
+        session: u64,
+        result: Result<String>,
+    },
+    ConfigFile,
+}
+
+/// One press of the hotkey to the pill closing.
+struct Session {
+    id: u64,
+    engine: EngineKind,
+    recorder: Option<Recorder>,
+    pill: Option<WindowHandle<Pill>>,
+    /// Created at the first insertion, once the input method may have reported the text
+    /// already left of the cursor.
+    joiner: Option<Joiner>,
+    /// Segments handed to the transcriber whose text has not come back yet.
+    pending: usize,
+    /// The recorder may still deliver segments.
+    capturing: bool,
+    /// Confirm was pressed, so the session ends once the last segment is inserted.
+    stopping: bool,
+}
+
+pub struct Daemon {
+    store: Entity<Store>,
+    library: Entity<Library>,
+    status: Entity<Status>,
+    applied: Config,
+    mode: LanguageMode,
+    events: UnboundedSender<Event>,
+    transcriber: Transcriber,
+    inserter: Option<Inserter>,
+    session: Option<Session>,
+    next_session: u64,
+    tray: Option<Tray>,
+    tray_events: UnboundedSender<TrayEvent>,
+    _watcher: Option<notify::RecommendedWatcher>,
+}
+
+/// Starts the daemon and blocks until it quits.
+pub fn run(config: Config) -> Result<()> {
+    let (events, receiver) = unbounded();
+    let commands = events.clone();
+    ipc::serve(&socket_path(), move |command| {
+        commands.unbounded_send(Event::Command(command)).ok();
+    })?;
+
+    let application = gpui_platform::application().with_assets(Assets);
+    application.run(move |cx: &mut App| {
+        cx.set_quit_mode(QuitMode::Explicit);
+        if let Err(error) = Assets::load_fonts(cx) {
+            log::error!("cannot load the UI fonts: {error:#}");
+        }
+        tokativ_ui::refresh_theme(cx);
+        cx.bind_keys(bindings());
+
+        let daemon = match Daemon::new(config, events, cx) {
+            Ok(daemon) => daemon,
+            Err(error) => {
+                log::error!("{error:#}");
+                cx.quit();
+                return;
+            }
+        };
+        listen(daemon, receiver, cx);
+    });
+    std::fs::remove_file(socket_path()).ok();
+    Ok(())
+}
+
+fn listen(daemon: Entity<Daemon>, mut receiver: UnboundedReceiver<Event>, cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Some(event) = receiver.next().await {
+            daemon.update(cx, |daemon, cx| daemon.handle(event, cx));
+        }
+    })
+    .detach();
+}
+
+impl Daemon {
+    fn new(config: Config, events: UnboundedSender<Event>, cx: &mut App) -> Result<Entity<Self>> {
+        let (store, library, status) = tokativ_ui::entities(config.clone(), cx);
+        let transcriber = Transcriber::start(idle_limit(&config))?;
+        let inserter =
+            match Inserter::start(config.insertion.backend, config.insertion.terminals.clone()) {
+                Ok(inserter) => Some(inserter),
+                Err(error) => {
+                    log::error!("text insertion is unavailable: {error:#}");
+                    None
+                }
+            };
+
+        let (tray_events, mut tray_receiver) = unbounded();
+        let forwarded = events.clone();
+        cx.background_spawn(async move {
+            while let Some(event) = tray_receiver.next().await {
+                forwarded.unbounded_send(Event::Tray(event)).ok();
+            }
+        })
+        .detach();
+
+        let watched = events.clone();
+        let watcher = watch_config(move || {
+            watched.unbounded_send(Event::ConfigFile).ok();
+        })
+        .map_err(|error| log::warn!("config: not watching for edits: {error:#}"))
+        .ok();
+
+        let daemon = cx.new(|cx| {
+            let mut daemon = Self {
+                store: store.clone(),
+                library: library.clone(),
+                status,
+                mode: config.language,
+                applied: config.clone(),
+                events,
+                transcriber,
+                inserter,
+                session: None,
+                next_session: 0,
+                tray: None,
+                tray_events,
+                _watcher: watcher,
+            };
+            cx.observe(
+                &store,
+                |this: &mut Self, store: Entity<Store>, cx: &mut Context<Self>| {
+                    let config = store.read(cx).config().clone();
+                    this.apply(config, cx);
+                },
+            )
+            .detach();
+            daemon.place_tray(config.tray);
+            daemon.publish(cx);
+            daemon.preload(cx);
+            daemon
+        });
+
+        let weak = daemon.downgrade();
+        Host::install(
+            store,
+            library.clone(),
+            daemon.read(cx).status.clone(),
+            move |action, cx| {
+                weak.update(cx, |daemon, cx| daemon.act(action, cx)).ok();
+            },
+            cx,
+        );
+
+        let first_run = !config_path().exists() || !library.read(cx).any_installed();
+        if first_run {
+            daemon.update(cx, |daemon, cx| daemon.open_setup(cx));
+        }
+        log::info!("tokativ is listening on {}", socket_path().display());
+        Ok(daemon)
+    }
+
+    fn handle(&mut self, event: Event, cx: &mut Context<Self>) {
+        match event {
+            Event::Command(command) => self.command(command, cx),
+            Event::Tray(TrayEvent::Toggle) => self.toggle(cx),
+            Event::Tray(TrayEvent::Lang(mode)) => self.set_mode(mode, cx),
+            Event::Tray(TrayEvent::Settings) => self.open_settings(cx),
+            Event::Tray(TrayEvent::Quit) => self.quit(cx),
+            Event::Recorder { session, event } => self.recorded(session, event, cx),
+            Event::Transcribed { session, result } => self.transcribed(session, result, cx),
+            Event::ConfigFile => match Config::load() {
+                Ok(config) => self.store.update(cx, |store, cx| store.replace(config, cx)),
+                Err(error) => log::warn!("config: keeping the running settings: {error:#}"),
+            },
+        }
+    }
+
+    fn command(&mut self, command: Command, cx: &mut Context<Self>) {
+        log::debug!("command: {command:?}");
+        match command {
+            Command::Toggle => self.toggle(cx),
+            Command::Start => self.start(cx),
+            Command::Stop | Command::Confirm => self.confirm(cx),
+            Command::Cancel => self.cancel(cx),
+            Command::Lang(mode) => self.set_mode(mode, cx),
+            Command::Settings => self.open_settings(cx),
+            Command::Quit => self.quit(cx),
+            Command::Ping => {}
+        }
+    }
+
+    fn act(&mut self, action: Action, cx: &mut Context<Self>) {
+        match action {
+            Action::Toggle => self.toggle(cx),
+            Action::Confirm => self.confirm(cx),
+            Action::Cancel => self.cancel(cx),
+            Action::Settings => self.open_settings(cx),
+            Action::Quit => self.quit(cx),
+        }
+    }
+
+    fn toggle(&mut self, cx: &mut Context<Self>) {
+        match &self.session {
+            None => self.start(cx),
+            Some(session) if !session.stopping => self.confirm(cx),
+            Some(_) => log::info!("session: still finishing the last one"),
+        }
+    }
+
+    fn start(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_some() {
+            return;
+        }
+        let config = self.store.read(cx).config().clone();
+        let engine = config.engines.for_mode(self.mode);
+        if !self.library.read(cx).installed(engine) {
+            log::warn!("session: {} is not downloaded", engine.name());
+            self.open_setup(cx);
+            return;
+        }
+
+        self.next_session += 1;
+        let id = self.next_session;
+        self.transcriber.preload(engine);
+        tokativ_ui::refresh_theme(cx);
+
+        let recorder = Silero::new().and_then(|silero| {
+            let events = self.events.clone();
+            Recorder::start(
+                Options {
+                    device: config.input_device.clone(),
+                    timing: Timing {
+                        threshold: config.vad.threshold,
+                        silence_ms: config.vad.silence_ms,
+                        max_segment_s: config.vad.max_segment_s,
+                        preroll_ms: config.vad.preroll_ms,
+                    },
+                },
+                Some(Box::new(silero) as Box<dyn SpeechDetector>),
+                move |event| {
+                    events
+                        .unbounded_send(Event::Recorder { session: id, event })
+                        .ok();
+                },
+            )
+        });
+        let levels = recorder
+            .as_ref()
+            .map(|recorder| recorder.levels().clone())
+            .unwrap_or_default();
+        let pill = self.open_pill(levels, &config, cx);
+
+        let recorder = match recorder {
+            Ok(recorder) => recorder,
+            Err(error) => {
+                log::error!("session: cannot record: {error:#}");
+                if let Some(pill) = pill {
+                    set_phase(pill, Phase::Error, cx);
+                }
+                return;
+            }
+        };
+        if let Some(inserter) = &self.inserter {
+            inserter.begin();
+        }
+        log::info!("session {id}: listening with {}", engine.name());
+        self.session = Some(Session {
+            id,
+            engine,
+            recorder: Some(recorder),
+            pill,
+            joiner: None,
+            pending: 0,
+            capturing: true,
+            stopping: false,
+        });
+        self.publish(cx);
+    }
+
+    fn open_pill(
+        &self,
+        levels: tokativ_audio::Levels,
+        config: &Config,
+        cx: &mut Context<Self>,
+    ) -> Option<WindowHandle<Pill>> {
+        let confirm = cx.entity().downgrade();
+        let cancel = confirm.clone();
+        let opened = tokativ_ui::pill::open(
+            levels,
+            config.pill.edge,
+            config.pill.margin,
+            move |cx| {
+                confirm.update(cx, |daemon, cx| daemon.confirm(cx)).ok();
+            },
+            move |cx| {
+                cancel.update(cx, |daemon, cx| daemon.cancel(cx)).ok();
+            },
+            cx,
+        );
+        opened
+            .map_err(|error| log::error!("session: cannot show the pill: {error:#}"))
+            .ok()
+    }
+
+    fn confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        if session.stopping {
+            return;
+        }
+        session.stopping = true;
+        if let Some(recorder) = session.recorder.take() {
+            recorder.stop();
+        }
+        if let Some(pill) = session.pill {
+            set_phase(pill, Phase::Processing, cx);
+        }
+        log::info!("session {}: confirmed", session.id);
+        self.finish_if_done(cx);
+    }
+
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        let Some(mut session) = self.session.take() else {
+            return;
+        };
+        if let Some(recorder) = session.recorder.take() {
+            recorder.cancel();
+        }
+        log::info!("session {}: cancelled", session.id);
+        self.close(session, cx);
+    }
+
+    fn recorded(&mut self, id: u64, event: tokativ_audio::Event, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
+            return;
+        };
+        match event {
+            tokativ_audio::Event::Started => log::debug!("session {id}: speech"),
+            tokativ_audio::Event::Segment(segment) => {
+                session.pending += 1;
+                log::debug!(
+                    "session {id}: segment of {:.1} s{}",
+                    segment.samples.len() as f32 / tokativ_audio::RATE as f32,
+                    if segment.forced {
+                        ", cut at the limit"
+                    } else {
+                        ""
+                    }
+                );
+                if let Some(inserter) = &self.inserter {
+                    inserter.placeholder();
+                }
+                let events = self.events.clone();
+                self.transcriber
+                    .transcribe(session.engine, segment.samples, move |result| {
+                        events
+                            .unbounded_send(Event::Transcribed {
+                                session: id,
+                                result,
+                            })
+                            .ok();
+                    });
+            }
+            tokativ_audio::Event::Failed(error) => {
+                log::error!("session {id}: capture failed: {error}");
+                if let Some(pill) = session.pill.take() {
+                    set_phase(pill, Phase::Error, cx);
+                }
+                let session = self.session.take().expect("session checked above");
+                self.close(session, cx);
+            }
+            tokativ_audio::Event::Finished => {
+                session.capturing = false;
+                self.finish_if_done(cx);
+            }
+        }
+    }
+
+    fn transcribed(&mut self, id: u64, result: Result<String>, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
+            return;
+        };
+        session.pending -= 1;
+        match result {
+            Ok(text) => {
+                log::debug!("session {id}: {text:?}");
+                if let Some(inserter) = &self.inserter {
+                    let joiner = session
+                        .joiner
+                        .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref()));
+                    if let Some(text) = joiner.join(&text) {
+                        inserter.insert(text, session.pending > 0);
+                    }
+                }
+            }
+            Err(error) => log::error!("session {id}: transcription failed: {error:#}"),
+        }
+        self.finish_if_done(cx);
+    }
+
+    fn finish_if_done(&mut self, cx: &mut Context<Self>) {
+        let done = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.stopping && !session.capturing && session.pending == 0);
+        if done {
+            let session = self.session.take().expect("session checked above");
+            log::info!("session {}: done", session.id);
+            self.close(session, cx);
+        }
+    }
+
+    fn close(&mut self, session: Session, cx: &mut Context<Self>) {
+        if let Some(inserter) = &self.inserter {
+            inserter.end();
+        }
+        if let Some(pill) = session.pill {
+            cx.defer(move |cx| {
+                pill.update(cx, |_, window, _| window.remove_window()).ok();
+            });
+        }
+        self.publish(cx);
+    }
+
+    fn set_mode(&mut self, mode: LanguageMode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        log::info!("mode: {}", mode.name());
+        let engine = self.store.read(cx).config().engines.for_mode(mode);
+        if self.library.read(cx).installed(engine) {
+            self.transcriber.preload(engine);
+        }
+        self.publish(cx);
+    }
+
+    /// Applies a changed config. Session settings take effect from the next session.
+    fn apply(&mut self, config: Config, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.applied, config.clone());
+        if old.language != config.language {
+            self.mode = config.language;
+        }
+        if old.insertion.backend != config.insertion.backend {
+            self.inserter =
+                Inserter::start(config.insertion.backend, config.insertion.terminals.clone())
+                    .map_err(|error| log::error!("text insertion is unavailable: {error:#}"))
+                    .ok();
+        } else if old.insertion.terminals != config.insertion.terminals
+            && let Some(inserter) = &self.inserter
+        {
+            inserter.set_terminals(config.insertion.terminals.clone());
+        }
+        if old.tray != config.tray {
+            self.place_tray(config.tray);
+        }
+        if old.launch_at_login != config.launch_at_login
+            && let Err(error) = autostart::apply(config.launch_at_login)
+        {
+            log::error!("autostart: {error:#}");
+        }
+        if old.models != config.models {
+            self.transcriber.set_idle_limit(idle_limit(&config));
+        }
+        self.publish(cx);
+    }
+
+    fn preload(&self, cx: &App) {
+        let config = self.store.read(cx).config();
+        if config.models.unload_after_minutes != 0 {
+            return;
+        }
+        let library = self.library.read(cx);
+        for mode in LanguageMode::ALL {
+            let engine = config.engines.for_mode(mode);
+            if library.installed(engine) {
+                self.transcriber.preload(engine);
+            }
+        }
+    }
+
+    fn place_tray(&mut self, shown: bool) {
+        self.tray = match shown {
+            false => None,
+            true => Tray::spawn(self.tray_events.clone(), self.session.is_some(), self.mode)
+                .map_err(|error| log::warn!("tray: {error:#}"))
+                .ok(),
+        };
+    }
+
+    /// Pushes the daemon's state to the windows and the tray.
+    fn publish(&mut self, cx: &mut Context<Self>) {
+        let recording = self.session.is_some();
+        let mode = self.mode;
+        let (method, note) = match &self.inserter {
+            Some(inserter) => {
+                let status = inserter.status();
+                (status.method.name().to_string(), status.note)
+            }
+            None => (
+                "Unavailable".to_string(),
+                Some("no Wayland connection".to_string()),
+            ),
+        };
+        self.status.update(cx, |status, cx| {
+            *status = Status {
+                method,
+                note,
+                recording,
+                mode,
+            };
+            cx.notify();
+        });
+        if let Some(tray) = &self.tray {
+            tray.show(recording, mode);
+        }
+    }
+
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        tokativ_ui::refresh_theme(cx);
+        tokativ_ui::settings::open(cx);
+    }
+
+    fn open_setup(&mut self, cx: &mut Context<Self>) {
+        tokativ_ui::refresh_theme(cx);
+        tokativ_ui::setup::open(cx);
+    }
+
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        self.cancel(cx);
+        self.tray = None;
+        cx.quit();
+    }
+}
+
+/// Changes the pill's phase once the current update is done, since the change may come from a
+/// click inside the pill itself and GPUI cannot update a window that is mid-update.
+fn set_phase(pill: WindowHandle<Pill>, phase: Phase, cx: &mut App) {
+    cx.defer(move |cx| {
+        pill.update(cx, |pill, window, cx| pill.set_phase(phase, window, cx))
+            .ok();
+    });
+}
+
+fn idle_limit(config: &Config) -> Option<Duration> {
+    match config.models.unload_after_minutes {
+        0 => None,
+        minutes => Some(Duration::from_secs(minutes as u64 * 60)),
+    }
+}
+
+/// Watches the config folder and calls `changed` whenever the config file is written. The
+/// folder is watched rather than the file, since saving replaces the file.
+fn watch_config(changed: impl Fn() + Send + 'static) -> Result<notify::RecommendedWatcher> {
+    let directory = config_dir();
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("creating {}", directory.display()))?;
+    let path = config_path();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let Ok(event) = event else {
+            return;
+        };
+        let touched = event.paths.iter().any(|touched| touched == &path);
+        if touched && (event.kind.is_create() || event.kind.is_modify()) {
+            changed();
+        }
+    })
+    .context("starting the config watcher")?;
+    watcher
+        .watch(&directory, RecursiveMode::NonRecursive)
+        .with_context(|| format!("watching {}", directory.display()))?;
+    Ok(watcher)
+}
+
+/// The editing keys for the text fields in the setup and settings windows.
+fn bindings() -> Vec<KeyBinding> {
+    use ui::*;
+    let editing = Some(INPUT_CONTEXT);
+    vec![
+        KeyBinding::new("backspace", Backspace, editing),
+        KeyBinding::new("ctrl-backspace", BackspaceWord, editing),
+        KeyBinding::new("delete", Delete, editing),
+        KeyBinding::new("ctrl-delete", DeleteWord, editing),
+        KeyBinding::new("left", Left, editing),
+        KeyBinding::new("right", Right, editing),
+        KeyBinding::new("ctrl-left", WordLeft, editing),
+        KeyBinding::new("ctrl-right", WordRight, editing),
+        KeyBinding::new("shift-left", SelectLeft, editing),
+        KeyBinding::new("shift-right", SelectRight, editing),
+        KeyBinding::new("shift-ctrl-left", SelectWordLeft, editing),
+        KeyBinding::new("shift-ctrl-right", SelectWordRight, editing),
+        KeyBinding::new("home", Home, editing),
+        KeyBinding::new("end", End, editing),
+        KeyBinding::new("shift-home", SelectHome, editing),
+        KeyBinding::new("shift-end", SelectEnd, editing),
+        KeyBinding::new("ctrl-a", SelectAll, editing),
+        KeyBinding::new("ctrl-v", Paste, editing),
+        KeyBinding::new("ctrl-c", Copy, editing),
+        KeyBinding::new("ctrl-x", Cut, editing),
+        KeyBinding::new("space", Space, editing),
+        KeyBinding::new("escape", Dismiss, editing),
+    ]
+}
