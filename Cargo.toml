@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/tokativ"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+tokativ-audio = { path = "crates/audio" }
+tokativ-config = { path = "crates/config" }
+tokativ-engine = { path = "crates/engine" }
+tokativ-input = { path = "crates/input" }
+tokativ-ui = { path = "crates/ui" }
+
+anyhow = "1.0"
+dirs = "6.0"
+env_logger = "0.11"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+cpal = "0.17"
+rtrb = "0.3"
+rubato = "0.16"
+rustfft = "6.4"
+rustix = { version = "1", features = ["event", "fs"] }
+serde_json = "1.0"
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wl-clipboard-rs = "0.9"
+futures = "0.3"
+hound = "3.5"
+gpui = { git = "https://github.com/sonorahq/gpui", rev = "439295d5c1e21682a704b93a6ade6a7d5a585ccd" }
+gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "439295d5c1e21682a704b93a6ade6a7d5a585ccd", features = [
+  "font-kit",
+  "wayland",
+] }
+icons = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
+ui = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
+ndarray = "0.17"
+# transcribe-rs asks for ^2.0.0-rc.12 but breaks on rc.14, and rc.12 is the newest that runs on
+# the onnxruntime nixpkgs ships.
+ort = "=2.0.0-rc.12"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+sha2 = "0.10"
+transcribe-rs = { version = "0.3.12", features = ["onnx"] }
+clap = { version = "4.5", features = ["derive"] }
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+notify = "8.2"
