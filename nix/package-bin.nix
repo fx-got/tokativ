@@ -70,6 +70,7 @@ stdenv.mkDerivation {
     install -Dm444 ${../assets/fonts/LICENSE.txt} "$out/share/licenses/tokativ/LICENSE.Inter"
     install -Dm444 ${../assets/silero/LICENSE} "$out/share/licenses/tokativ/LICENSE.silero-vad"
     install -Dm444 ${../assets/icons/LICENSE} "$out/share/licenses/tokativ/LICENSE.lucide"
+    install -Dm444 ${../assets/emoji/LICENSE} "$out/share/licenses/tokativ/LICENSE.Unicode"
     runHook postInstall
   '';
 
@@ -79,7 +80,7 @@ stdenv.mkDerivation {
 
   meta = tokativ-source.meta // {
     sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
-    # Releases carry binaries for Linux only.
+    # This derivation installs the Linux release executables.
     platforms = builtins.attrNames release.assets;
   };
 }

@@ -23,3 +23,6 @@ transcribe-cpp = { workspace = true, features = ["vulkan"] }
 [dev-dependencies]
 hound.workspace = true
 tokativ-audio.workspace = true
+
+[build-dependencies]
+cc = "1"

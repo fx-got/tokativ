@@ -7169,6 +7169,7 @@ name = "tokativ-engine"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "cc",
  "hound",
  "log",
  "regex",

@@ -157,8 +157,15 @@ jobs:
           key: release-${{ matrix.target }}
           cache-on-failure: true
 
-      - name: build
+      - name: build Unix
+        if: runner.os != 'Windows'
         shell: bash
+        run: cargo build --release --locked --package tokativ --target ${{ matrix.target }}
+
+      # Git Bash prepends /usr/bin, where GNU link shadows MSVC's link.exe.
+      - name: build Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: cargo build --release --locked --package tokativ --target ${{ matrix.target }}
 
       - name: stage and check Unix executable

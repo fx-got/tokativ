@@ -118,6 +118,7 @@ rustPlatform.buildRustPackage {
     install -Dm444 assets/fonts/LICENSE.txt $out/share/licenses/tokativ/LICENSE.Inter
     install -Dm444 assets/silero/LICENSE $out/share/licenses/tokativ/LICENSE.silero-vad
     install -Dm444 assets/icons/LICENSE $out/share/licenses/tokativ/LICENSE.lucide
+    install -Dm444 assets/emoji/LICENSE $out/share/licenses/tokativ/LICENSE.Unicode
   ''
   + lib.optionalString isLinux ''
     install -Dm444 assets/linux/tokativ.desktop $out/share/applications/tokativ.desktop
