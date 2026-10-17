@@ -15,6 +15,7 @@ mod radius;
 pub mod settings;
 pub mod setup;
 mod spring;
+mod squircle;
 mod text_morph;
 pub mod themes;
 pub mod updates;
