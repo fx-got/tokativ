@@ -16,15 +16,15 @@
       # The release the default package installs. Each hash is the SRI form of the asset's line in
       # that release's SHA256SUMS.
       release = {
-        version = "0.1.0";
+        version = "0.2.0";
         assets = {
           x86_64-linux = {
             target = "x86_64-unknown-linux-gnu";
-            hash = "sha256-dxuxo54rAxI+ka1IMv8rcYciYUZLm+Fddd678F7i5gI=";
+            hash = "sha256-DYEL4M6qsWFPbBYr1BMUtwIgU5Was3igEKX4EINxgT8=";
           };
           aarch64-linux = {
             target = "aarch64-unknown-linux-gnu";
-            hash = "sha256-EJuirB6OfpQ3mxL5FoQSAlp1YTWqOK2vvpTWN5O0Jsc=";
+            hash = "sha256-oPdZh88HQGgvR097MPeN3mR9jl/7N0ZTLGC9OdviWTw=";
           };
         };
       };
