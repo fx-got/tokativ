@@ -151,6 +151,16 @@ impl Engine for Gguf {
         let plain = RunOptions::default();
         if let Some(options) = self.options(context) {
             match self.session.run(samples, &options) {
+                // Whisper repeats the start of its vocabulary prompt when it cannot make out
+                // the audio, so that phrase is heard again without the prompt.
+                Ok(transcript)
+                    if !options.vocabulary.is_empty() && echoes_glossary(&transcript.text) =>
+                {
+                    log::debug!(
+                        "engine: {:?} echoes the vocabulary, retrying without it",
+                        transcript.text
+                    );
+                }
                 Ok(transcript) => return Ok(transcript.text),
                 // The context is a help, so a model that rejects it still transcribes.
                 Err(error) => log::warn!("engine: transcribing without the context: {error}"),
@@ -424,6 +434,14 @@ pub fn route_native_logs() {
     transcribe_cpp::init_logging();
 }
 
+/// Whether `text` starts with the word transcribe.cpp opens Whisper's vocabulary prompt with,
+/// `Glossary:`, which means the model repeated its prompt instead of transcribing.
+fn echoes_glossary(text: &str) -> bool {
+    text.split(|character: char| !character.is_alphanumeric())
+        .find(|word| !word.is_empty())
+        .is_some_and(|first| first.eq_ignore_ascii_case("glossary"))
+}
+
 /// The end of `text`, at most `limit` characters, starting at a word so the model never sees a
 /// cut-off one.
 fn tail(text: &str, limit: usize) -> &str {
@@ -452,5 +470,15 @@ mod tests {
         assert_eq!(tail("  short  ", 300), "short");
         assert_eq!(tail("one two three four", 9), "four");
         assert_eq!(tail("один два три", 7), "три");
+    }
+
+    #[test]
+    fn a_repeated_prompt_is_caught() {
+        assert!(echoes_glossary("Glossary"));
+        assert!(echoes_glossary(" glossary: Sonora, Tokativ."));
+        assert!(echoes_glossary("Glossary. The meeting moved."));
+        assert!(!echoes_glossary("Sonora is out"));
+        assert!(!echoes_glossary("Glossaries are long"));
+        assert!(!echoes_glossary(""));
     }
 }
