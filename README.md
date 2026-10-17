@@ -12,8 +12,8 @@ focused app as you speak.
 [![Platforms](https://img.shields.io/badge/runs%20on-linux%20%7C%20macos%20%7C%20windows-2b2b33?style=flat-square)](#install)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/readme-dark.png">
-  <img src="docs/readme-light.png" alt="The Tokativ pill and live caption while dictating" width="900">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.png">
+  <img src="docs/hero-light.png" alt="The Tokativ pill and live caption while dictating" width="900">
 </picture>
 <br>
 <br>
