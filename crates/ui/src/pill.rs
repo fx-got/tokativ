@@ -121,10 +121,18 @@ impl Spring {
         self.config = config;
     }
 
+    /// Moves the value on by `elapsed`. Once it has come to rest it lands exactly on the target,
+    /// since a value left a hair off would keep the pill on fractional pixels for good.
     fn step(&mut self, elapsed: Duration) {
         self.state = self
             .config
             .step(self.state, self.target, elapsed.as_secs_f32());
+        if self.settled() {
+            self.state = SpringState {
+                position: self.target,
+                velocity: 0.,
+            };
+        }
     }
 
     fn at(&self) -> f32 {
@@ -337,63 +345,69 @@ impl Render for Pill {
         // overshoots a little, so it lands slightly wide and settles back.
         let body = self.body.at().max(0.);
         let unfolded = body.min(1.);
-        let width = HEIGHT + (WIDTH - HEIGHT) * body;
+        let width = ui::snapped(HEIGHT + (WIDTH - HEIGHT) * body, window);
         let scale = FOLDED_SCALE + (1. - FOLDED_SCALE) * body;
         let controls = self.controls.at().max(0.);
         let pop = (0.4 + 0.6 * controls).max(0.01);
         let control_opacity = controls.min(1.);
+        // At rest the capsule is drawn plainly. Any layer effect left on, even at a scale of
+        // 0.9999, resamples it and shifts its edges by a fraction of a pixel.
+        let moving = body != 1. || controls != 1.;
 
-        div()
-            .size_full()
-            .p(SHADOW)
-            .flex()
-            .items_center()
-            .justify_center()
-            .font_family("Inter")
-            .child(
-                div()
-                    .flex_none()
-                    .w(width)
-                    .h(HEIGHT)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .p(PADDING - BORDER)
-                    .rounded(radius)
-                    .bg(surface)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
-                    .overflow_hidden()
-                    .opacity((unfolded * 2.5).min(1.))
-                    .layer_scale(scale.max(0.01))
-                    .when(unfolded < 1., |this| {
-                        this.blur(FOLDED_BLUR * (1. - unfolded))
-                    })
-                    .child(
-                        circle("cancel", button, theme.secondary, theme.secondary_hover)
-                            .opacity(control_opacity)
-                            .layer_scale(pop)
-                            .child(icon("icons/x.svg", theme.foreground))
-                            .on_click(move |_, _, cx| on_cancel(cx)),
-                    )
-                    .child(bars(shown, reveal, bar_color).flex_1().h_full())
-                    .child(
-                        circle(
-                            "confirm",
-                            button,
-                            theme.foreground,
-                            theme.foreground.opacity(0.85),
-                        )
-                        .opacity(match listening {
-                            true => control_opacity,
-                            false => control_opacity * 0.5,
+        // The capsule is placed on whole device pixels. Centring it with flex would put it on a
+        // half pixel whenever the room around it is an odd number of them.
+        let left = ui::snapped((window.viewport_size().width - width) / 2., window);
+        let top = ui::snapped(SHADOW, window);
+
+        div().size_full().relative().font_family("Inter").child(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(width)
+                .h(HEIGHT)
+                .flex()
+                .items_center()
+                .justify_between()
+                .p(PADDING - BORDER)
+                .rounded(radius)
+                .bg(surface)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .overflow_hidden()
+                .when(moving, |this| {
+                    this.opacity((unfolded * 2.5).min(1.))
+                        .layer_scale(scale.max(0.01))
+                })
+                .when(unfolded < 1., |this| {
+                    this.blur(FOLDED_BLUR * (1. - unfolded))
+                })
+                .child(
+                    circle("cancel", button, theme.secondary, theme.secondary_hover)
+                        .when(moving, |this| {
+                            this.opacity(control_opacity).layer_scale(pop)
                         })
-                        .layer_scale(pop)
-                        .child(icon("icons/check.svg", theme.background))
-                        .on_click(move |_, _, cx| on_confirm(cx)),
-                    ),
-            )
+                        .child(icon("icons/x.svg", theme.foreground))
+                        .on_click(move |_, _, cx| on_cancel(cx)),
+                )
+                .child(bars(shown, reveal, bar_color).flex_1().h_full())
+                .child(
+                    circle(
+                        "confirm",
+                        button,
+                        theme.foreground,
+                        theme.foreground.opacity(0.85),
+                    )
+                    .opacity(match listening {
+                        true => control_opacity,
+                        false => control_opacity * 0.5,
+                    })
+                    .when(moving, |this| this.layer_scale(pop))
+                    .child(icon("icons/check.svg", theme.background))
+                    .on_click(move |_, _, cx| on_confirm(cx)),
+                ),
+        )
     }
 }
 
