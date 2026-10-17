@@ -1,0 +1,142 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: name the artifact
+        id: meta
+        shell: bash
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/*) version="$GITHUB_REF_NAME" ;;
+            *) version="${GITHUB_SHA:0:7}" ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Ubuntu 22.04 keeps the glibc floor low but has no glslc and Vulkan headers too old
+      # for ggml's shaders, so those come from the nixpkgs the flake pins. The loader the
+      # binary links against stays Ubuntu's.
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake libclang-dev \
+            libasound2-dev libfontconfig1-dev libfreetype-dev \
+            libxkbcommon-dev libwayland-dev libvulkan-dev
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: vulkan toolchain
+        run: |
+          set -euo pipefail
+          glslc="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#shaderc.bin)"
+          headers="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#vulkan-headers)"
+          spirv="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#spirv-headers)"
+          # GGML_NATIVE would tune the CPU code to this runner and crash on older processors.
+          echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DVulkan_GLSLC_EXECUTABLE=$glslc/bin/glslc -DVulkan_INCLUDE_DIR=$headers/include -DCMAKE_PREFIX_PATH=$spirv" >> "$GITHUB_ENV"
+
+      - name: rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: build
+        run: cargo build --release --locked --package tokativ --target ${{ matrix.target }}
+
+      - name: stage the executable
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/$TARGET/release/tokativ" "dist/tokativ-$VERSION-$TARGET"
+          ldd "dist/tokativ-$VERSION-$TARGET"
+          # The newest glibc symbol the binary asks for is the oldest distribution it runs on.
+          objdump -T "dist/tokativ-$VERSION-$TARGET" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: stage the licenses
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p licenses
+          cp COPYING licenses/LICENSE
+          cp assets/fonts/LICENSE.txt licenses/LICENSE.Inter
+          cp assets/silero/LICENSE licenses/LICENSE.silero-vad
+          tar -czf "dist/tokativ-$VERSION-licenses.tar.gz" -C licenses .
+
+      - name: checksums
+        run: cd dist && shasum -a 256 * > SHA256SUMS
+
+      # The notes are the tag's section of the changelog, without its heading.
+      - name: release notes
+        env:
+          NUMBER: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          number="${NUMBER#v}"
+          awk -v heading="## [$number]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found && /^\[[^]]+\]: / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
