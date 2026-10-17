@@ -1,13 +1,13 @@
 //! The model list and the Hugging Face search, shared by the settings and setup windows.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, ClickEvent, Entity, SharedString, Window, div, px};
+use gpui::{AnyElement, App, ClickEvent, Entity, Pixels, SharedString, Window, div, px};
 use tokativ_engine::ModelId;
-use tokativ_engine::models::{self, Repository};
+use tokativ_engine::models::{self, RemoteFile, Repository};
 use ui::{ActiveTheme as _, Button, Text};
 
 use crate::chrome::{self, meter};
-use crate::host::{Files, Library, ModelState};
+use crate::host::{Library, ModelState};
 
 type Choose = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -183,34 +183,29 @@ pub(crate) fn model_row(
         .into_any_element()
 }
 
-/// One repository found by search. Clicking it lists its files, one row per quantization.
-pub(crate) fn repository_row(
-    repository: &Repository,
-    open: bool,
-    library: &Entity<Library>,
-    toggle: Choose,
-    cx: &App,
-) -> AnyElement {
+/// The height of every row in the virtualized search lists. A uniform list only draws the rows
+/// in view, which needs them all the same height.
+pub(crate) const LIST_ROW: Pixels = px(60.);
+
+/// One repository found by search, which opens its files when clicked.
+pub(crate) fn result_row(repository: &Repository, open: Choose, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let small = theme.text(Text::Small);
     let (owner, name) = repository
         .id
         .split_once('/')
         .unwrap_or(("", repository.id.as_str()));
-    let facts = format!(
-        "{}  ·  {} downloads",
-        repository.architecture.as_deref().unwrap_or("unknown"),
-        count(repository.downloads)
-    );
-    let header = div()
+    div()
         .id(SharedString::from(format!("repo-{}", repository.id)))
+        .h(LIST_ROW)
         .flex()
         .items_center()
         .gap_3()
         .px(chrome::GROUP_PADDING)
-        .py_3()
+        .rounded(theme.radius)
         .cursor_pointer()
-        .on_click(toggle)
+        .hover(|style| style.bg(theme.secondary.opacity(0.6)))
+        .on_click(open)
         .child(
             div()
                 .flex()
@@ -223,9 +218,17 @@ pub(crate) fn repository_row(
                         .flex()
                         .items_baseline()
                         .gap_2()
-                        .child(name.to_owned())
+                        .min_w_0()
                         .child(
                             div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(name.to_owned()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
                                 .text_size(small)
                                 .text_color(theme.muted_foreground)
                                 .child(owner.to_owned()),
@@ -235,66 +238,115 @@ pub(crate) fn repository_row(
                     div()
                         .text_size(small)
                         .text_color(theme.muted_foreground)
-                        .child(facts),
+                        .child(facts(repository)),
                 ),
         )
         .child(
             gpui::svg()
-                .path(icons::path(match open {
-                    true => "icons/chevron-up.svg",
-                    false => "icons/chevron-down.svg",
-                }))
+                .path(icons::path("icons/chevron-right.svg"))
                 .size(px(16.))
                 .flex_none()
                 .text_color(theme.muted_foreground),
-        );
+        )
+        .into_any_element()
+}
 
-    let files = open.then(
-        || match library.read(cx).search.files.get(&repository.id).cloned() {
-            None | Some(Files::Loading) => vec![note("Listing files", cx)],
-            Some(Files::Failed(error)) => vec![note(&format!("Cannot list files: {error}"), cx)],
-            Some(Files::Loaded(files)) if files.is_empty() => {
-                vec![note("No GGUF files in this repository", cx)]
+/// The architecture and popularity of a repository, in one line.
+pub(crate) fn facts(repository: &Repository) -> String {
+    format!(
+        "{}  ·  {} downloads  ·  {} likes",
+        repository.architecture.as_deref().unwrap_or("unknown"),
+        count(repository.downloads),
+        count(repository.likes)
+    )
+}
+
+/// One GGUF file of a repository: its quantization and size, where it stands, and the button
+/// that downloads, cancels or deletes it.
+pub(crate) fn file_row(
+    repo: &str,
+    file: &RemoteFile,
+    library: &Entity<Library>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let small = theme.text(Text::Small);
+    let id = ModelId {
+        repo: repo.to_owned(),
+        file: file.name.clone(),
+    };
+    let state = library.read(cx).state(&id);
+    let status = match &state {
+        ModelState::Missing => chrome::size(file.size),
+        ModelState::Downloading { done, total } => format!(
+            "Downloading, {:.0}%",
+            *done as f64 / (*total).max(1) as f64 * 100.
+        ),
+        ModelState::Installed { .. } => format!("{}, installed", chrome::size(file.size)),
+        ModelState::Failed(error) => format!("Failed: {error}"),
+    };
+    let key = id.key();
+    let action = {
+        let library = library.clone();
+        let id = id.clone();
+        match state {
+            ModelState::Downloading { .. } => {
+                Button::new(SharedString::from(format!("cancel-{key}")))
+                    .label("Cancel")
+                    .small()
+                    .outline()
+                    .on_click(move |_, _, cx| library.update(cx, |library, _| library.cancel(&id)))
             }
-            Some(Files::Loaded(files)) => files
-                .into_iter()
-                .map(|file| {
-                    let id = ModelId {
-                        repo: repository.id.clone(),
-                        file: file.name.clone(),
-                    };
-                    let name = match file.quantization() {
-                        Some(quant) => format!("{quant}  ·  {}", chrome::size(file.size)),
-                        None => format!("{}  ·  {}", file.name, chrome::size(file.size)),
-                    };
-                    model_row(
-                        Described {
-                            id,
-                            name,
-                            maker: None,
-                            summary: None,
-                        },
-                        library,
-                        None,
-                        None,
-                        cx,
-                    )
-                })
-                .collect(),
-        },
-    );
-
+            ModelState::Installed { .. } => {
+                Button::new(SharedString::from(format!("delete-{key}")))
+                    .label("Delete")
+                    .small()
+                    .outline()
+                    .on_click(move |_, _, cx| {
+                        library.update(cx, |library, cx| library.delete(&id, cx))
+                    })
+            }
+            ModelState::Missing | ModelState::Failed(_) => {
+                Button::new(SharedString::from(format!("download-{key}")))
+                    .label("Download")
+                    .small()
+                    .primary()
+                    .on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        library.update(cx, |library, cx| library.download(id, cx))
+                    })
+            }
+        }
+    };
     div()
-        .child(header)
-        .when_some(files, |this, files| {
-            this.child(
-                div()
-                    .pl(chrome::GROUP_PADDING)
-                    .border_t_1()
-                    .border_color(theme.border.opacity(0.5))
-                    .children(files),
-            )
-        })
+        .h(LIST_ROW)
+        .flex()
+        .items_center()
+        .gap_3()
+        .px(chrome::GROUP_PADDING)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    file.quantization()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| file.name.clone()),
+                )
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(small)
+                        .text_color(theme.muted_foreground)
+                        .child(status),
+                ),
+        )
+        .child(div().flex_none().child(action))
         .into_any_element()
 }
 

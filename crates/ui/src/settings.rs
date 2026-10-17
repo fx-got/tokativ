@@ -3,9 +3,11 @@
 
 use gpui::Focusable as _;
 use gpui::prelude::*;
+use std::ops::Range;
+
 use gpui::{
-    AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Task, Window,
-    WindowHandle, div, px,
+    AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Task,
+    UniformListScrollHandle, Window, WindowHandle, div, px, svg, uniform_list,
 };
 use tokativ_config::{Backend, Capitals, Config, PillEdge, Processor};
 use tokativ_engine::ModelId;
@@ -15,12 +17,15 @@ use ui::{
 };
 
 use crate::chrome::{self, group, row};
-use crate::host::{Host, Library, Status, Store};
+use crate::host::{Files, Host, Library, Status, Store};
 use crate::models;
 use crate::usage::{Sampler, Usage};
 
-const WIDTH: f32 = 640.;
-const HEIGHT: f32 = 760.;
+const WIDTH: f32 = 920.;
+const HEIGHT: f32 = 720.;
+const SIDEBAR: gpui::Pixels = px(220.);
+/// The widest the page content grows, so rows stay readable in a wide window.
+const CONTENT: f32 = 720.;
 /// The ranges the sliders cover.
 const SILENCE_MS: (f32, f32) = (200., 2000.);
 const THRESHOLD: (f32, f32) = (0.2, 0.9);
@@ -32,6 +37,9 @@ const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 const DEVICE_MENU_HEIGHT: gpui::Pixels = px(300.);
 /// How long typing must pause before the search goes out.
 const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(350);
+
+/// Names the page the settings window opens on, for working on one page.
+pub const PAGE_VARIABLE: &str = "TOKATIV_SETTINGS_PAGE";
 
 struct Open(WindowHandle<Settings>);
 
@@ -49,10 +57,92 @@ pub fn open(cx: &mut App) {
     let options = chrome::options("Tokativ settings", Size::new(px(WIDTH), px(HEIGHT)), cx);
     match cx.open_window(options, |window, cx| {
         window.set_rem_size(cx.theme().font_size);
-        cx.new(|cx| Settings::new(window, cx))
+        cx.new(|cx| {
+            let mut settings = Settings::new(window, cx);
+            let first = std::env::var(PAGE_VARIABLE)
+                .ok()
+                .and_then(|id| Page::ALL.into_iter().find(|page| page.id() == id));
+            if let Some(page) = first {
+                settings.go(page, window, cx);
+            }
+            settings
+        })
     }) {
         Ok(handle) => cx.set_global(Open(handle)),
         Err(error) => log::error!("settings: cannot open the window: {error:#}"),
+    }
+}
+
+/// A page of the settings window, one per entry in the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    Model,
+    Find,
+    Dictation,
+    Style,
+    Typing,
+    Pill,
+    System,
+}
+
+impl Page {
+    /// The name `TOKATIV_SETTINGS_PAGE` takes.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Find => "find",
+            Self::Dictation => "dictation",
+            Self::Style => "style",
+            Self::Typing => "typing",
+            Self::Pill => "pill",
+            Self::System => "system",
+        }
+    }
+
+    const ALL: [Self; 7] = [
+        Self::Model,
+        Self::Find,
+        Self::Dictation,
+        Self::Style,
+        Self::Typing,
+        Self::Pill,
+        Self::System,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Model => "Model",
+            Self::Find => "Find models",
+            Self::Dictation => "Dictation",
+            Self::Style => "Writing style",
+            Self::Typing => "Typing",
+            Self::Pill => "Pill",
+            Self::System => "System",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Model => "The speech model sessions dictate with, and where it runs.",
+            Self::Find => "Speech models on Hugging Face that run here.",
+            Self::Dictation => "What Tokativ listens to and when a phrase ends.",
+            Self::Style => "Rules that rewrite each phrase before it is typed.",
+            Self::Typing => "How text reaches the app you dictate into.",
+            Self::Pill => "Where the pill appears while you dictate.",
+            Self::System => "Startup, the tray and what Tokativ costs to run.",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Model => "icons/library-big.svg",
+            Self::Find => "icons/search.svg",
+            Self::Dictation => "icons/mic-vocal.svg",
+            Self::Style => "icons/pencil.svg",
+            Self::Typing => "icons/text-select.svg",
+            Self::Pill => "icons/palette.svg",
+            Self::System => "icons/settings.svg",
+        }
     }
 }
 
@@ -91,6 +181,11 @@ pub struct Settings {
     searched: String,
     /// The search result whose files are listed.
     opened: Option<String>,
+    page: Page,
+    results_scroll: UniformListScrollHandle,
+    results_scrollbar: Entity<Scrollbar>,
+    files_scroll: UniformListScrollHandle,
+    files_scrollbar: Entity<Scrollbar>,
     _debounce: Option<Task<()>>,
 }
 
@@ -107,6 +202,8 @@ impl Settings {
             this.query_changed(cx)
         })
         .detach();
+        let results_scroll = UniformListScrollHandle::new();
+        let files_scroll = UniformListScrollHandle::new();
         cx.observe_window_appearance(window, |_, _, cx| {
             crate::refresh_theme(cx);
             cx.notify();
@@ -129,6 +226,15 @@ impl Settings {
             replace_to: cx.new(|cx| Input::new("Write as", cx)),
             searched: String::new(),
             opened: None,
+            page: Page::Model,
+            results_scrollbar: cx.new(|_| {
+                Scrollbar::new(results_scroll.0.borrow().base_handle.clone()).watching(view)
+            }),
+            results_scroll,
+            files_scrollbar: cx.new(|_| {
+                Scrollbar::new(files_scroll.0.borrow().base_handle.clone()).watching(view)
+            }),
+            files_scroll,
             _debounce: None,
             _sampling: cx.spawn(async move |this, cx| {
                 let mut sampler = Sampler::default();
@@ -650,47 +756,144 @@ impl Settings {
         group("Model", rows, cx)
     }
 
-    /// Search over Hugging Face for any model the engine can run.
-    fn find(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Search over Hugging Face for any model the engine can run. Results and a repository's
+    /// files are virtualized lists, so only the rows in view are drawn.
+    fn find(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
         let library = self.library.read(cx);
         let search = &library.search;
-        let mut rows = vec![
-            div()
-                .px(chrome::GROUP_PADDING)
-                .py_3()
-                .child(self.search_input.clone())
-                .into_any_element(),
-        ];
-        if search.query.trim().is_empty() {
-            rows.push(models::note(
-                "Search Hugging Face for speech models in GGUF form. Whisper, Parakeet, Canary, GigaAM, Moonshine, Qwen3-ASR and Voxtral all run here.",
-                cx,
-            ));
-        } else if search.loading && search.results.is_empty() {
-            rows.push(models::note("Searching", cx));
-        } else if let Some(error) = &search.error {
-            rows.push(models::note(&format!("Search failed: {error}"), cx));
-        } else if search.results.is_empty() {
-            rows.push(models::note("No models that run here match that.", cx));
-        }
-        let results = search.results.clone();
-        rows.extend(results.iter().map(|repository| {
-            let open = self.opened.as_deref() == Some(repository.id.as_str());
-            let repo = repository.id.clone();
-            let toggle = cx.listener(move |this, _, _, cx| {
-                let repo = repo.clone();
-                if this.opened.as_deref() == Some(repo.as_str()) {
-                    this.opened = None;
-                } else {
-                    this.library
-                        .update(cx, |library, cx| library.open_repository(repo.clone(), cx));
-                    this.opened = Some(repo);
+        let field = div().flex_none().child(self.search_input.clone());
+
+        if let Some(repo) = self.opened.clone() {
+            let found = search
+                .results
+                .iter()
+                .find(|repository| repository.id == repo)
+                .cloned();
+            let files = match search.files.get(&repo) {
+                Some(Files::Loaded(files)) => Some(files.clone()),
+                _ => None,
+            };
+            let waiting = match search.files.get(&repo) {
+                None | Some(Files::Loading) => Some("Listing files".to_string()),
+                Some(Files::Failed(error)) => Some(format!("Cannot list files: {error}")),
+                Some(Files::Loaded(files)) if files.is_empty() => {
+                    Some("No GGUF files in this repository".to_string())
                 }
-                cx.notify();
-            });
-            models::repository_row(repository, open, &self.library, Box::new(toggle), cx)
-        }));
-        group("Find models", rows, cx)
+                Some(Files::Loaded(_)) => None,
+            };
+            let back = Button::new("back-to-results")
+                .label("Results")
+                .icon("icons/chevron-left.svg")
+                .small()
+                .ghost()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.opened = None;
+                    cx.notify();
+                }));
+            let header = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().child(back))
+                .child(
+                    div()
+                        .text_size(theme.text(Text::Large))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(repo.clone()),
+                )
+                .when_some(found.as_ref(), |this, repository| {
+                    this.child(
+                        div()
+                            .text_size(theme.text(Text::Small))
+                            .text_color(theme.muted_foreground)
+                            .child(models::facts(repository)),
+                    )
+                });
+            let list = match files {
+                Some(files) => {
+                    let count = files.len();
+                    let repo = repo.clone();
+                    let rows = uniform_list(
+                        "repository-files",
+                        count,
+                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                            range
+                                .map(|index| {
+                                    models::file_row(&repo, &files[index], &this.library, cx)
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.files_scroll)
+                    .size_full();
+                    Scroller::listing("repository-files-scroll", &self.files_scrollbar)
+                        .child(rows)
+                        .into_any_element()
+                }
+                None => models::note(&waiting.unwrap_or_default(), cx),
+            };
+            return div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .size_full()
+                .child(header)
+                .child(listed(list, cx))
+                .into_any_element();
+        }
+
+        let note = if search.query.trim().is_empty() {
+            Some("Search for Whisper, Parakeet, Canary, GigaAM, Moonshine, Qwen3-ASR, Voxtral and more. Only models in GGUF form that run here are listed.".to_string())
+        } else if search.loading && search.results.is_empty() {
+            Some("Searching".to_string())
+        } else if let Some(error) = &search.error {
+            Some(format!("Search failed: {error}"))
+        } else if search.results.is_empty() {
+            Some("No models that run here match that.".to_string())
+        } else {
+            None
+        };
+        let results = search.results.clone();
+        let list = match note {
+            Some(note) => models::note(&note, cx),
+            None => {
+                let count = results.len();
+                let rows = uniform_list(
+                    "search-results",
+                    count,
+                    cx.processor(move |_, range: Range<usize>, _, cx| {
+                        range
+                            .map(|index| {
+                                let repository = &results[index];
+                                let repo = repository.id.clone();
+                                let open = cx.listener(move |this, _, _, cx| {
+                                    this.library.update(cx, |library, cx| {
+                                        library.open_repository(repo.clone(), cx)
+                                    });
+                                    this.opened = Some(repo.clone());
+                                    cx.notify();
+                                });
+                                models::result_row(repository, Box::new(open), cx)
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&self.results_scroll)
+                .size_full();
+                Scroller::listing("search-results-scroll", &self.results_scrollbar)
+                    .child(rows)
+                    .into_any_element()
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .size_full()
+            .child(field)
+            .child(listed(list, cx))
+            .into_any_element()
     }
 
     /// Searches once typing pauses, so each keystroke does not reach the network.
@@ -711,70 +914,227 @@ impl Settings {
         }));
     }
 
-    /// The window's opening: the app's mark and name.
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The sidebar: the app's mark, one entry per page, and what the engine runs on.
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let mark = theme.metrics.control * 1.4;
+        let mark = theme.metrics.control;
+        let current = self.page;
+        let device = self.status.read(cx).device.clone();
+        let entries = Page::ALL.into_iter().map(|page| {
+            let selected = page == current;
+            div()
+                .id(SharedString::from(format!("page-{}", page.title())))
+                .flex()
+                .items_center()
+                .gap_3()
+                .h(theme.metrics.control)
+                .px_3()
+                .rounded(theme.radius)
+                .cursor_pointer()
+                .text_color(match selected {
+                    true => theme.foreground,
+                    false => theme.muted_foreground,
+                })
+                .when(selected, |this| this.bg(theme.sidebar_accent))
+                .when(!selected, |this| {
+                    this.hover(|style| style.bg(theme.secondary.opacity(0.6)))
+                })
+                .on_click(cx.listener(move |this, _, window, cx| this.go(page, window, cx)))
+                .child(
+                    svg()
+                        .path(icons::path(page.icon()))
+                        .size(px(16.))
+                        .flex_none()
+                        .text_color(match selected {
+                            true => theme.foreground,
+                            false => theme.muted_foreground,
+                        }),
+                )
+                .child(page.title())
+        });
         div()
+            .flex_none()
+            .w(SIDEBAR)
+            .h_full()
             .flex()
-            .items_center()
-            .gap_4()
-            .pt_6()
-            .pb_2()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.sidebar_border)
             .child(
                 div()
-                    .flex_none()
-                    .size(mark)
-                    .rounded(mark / 2.)
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .bg(theme.foreground)
+                    .gap_3()
+                    .px_2()
+                    .pt_2()
+                    .pb_4()
                     .child(
-                        gpui::svg()
-                            .path(icons::path("icons/mic-vocal.svg"))
-                            .size(mark * 0.5)
-                            .text_color(theme.background),
+                        div()
+                            .flex_none()
+                            .size(mark)
+                            .rounded(mark / 2.)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(theme.foreground)
+                            .child(
+                                svg()
+                                    .path(icons::path("icons/mic-vocal.svg"))
+                                    .size(mark * 0.5)
+                                    .text_color(theme.background),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Tokativ"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.text(Text::Small))
+                                    .text_color(theme.muted_foreground)
+                                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                            ),
                     ),
             )
-            .child(
-                div()
-                    .text_size(theme.text(Text::Large))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Tokativ"),
-            )
+            .children(entries)
+            .child(div().flex_1())
+            .when_some(device, |this, device| {
+                this.child(
+                    div()
+                        .px_2()
+                        .text_size(theme.text(Text::Small))
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Running on {device}")),
+                )
+            })
     }
+
+    /// Switches page and starts the new one at its top. The search page puts the cursor in its
+    /// field, since typing is the only thing to do there.
+    fn go(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != page {
+            self.page = page;
+            self.scrollbar
+                .read(cx)
+                .scroll()
+                .set_offset(gpui::Point::default());
+            cx.notify();
+        }
+        if page == Page::Find {
+            let focus = self.search_input.focus_handle(cx);
+            focus.focus(window, cx);
+        }
+    }
+
+    /// The groups of the current page.
+    fn page(&self, config: &Config, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        match self.page {
+            Page::Model => vec![self.models(config, cx).into_any_element()],
+            Page::Find => vec![self.find(cx)],
+            Page::Dictation => vec![
+                self.dictation(config, cx).into_any_element(),
+                self.detection(config, cx).into_any_element(),
+            ],
+            Page::Style => vec![self.style(config, cx).into_any_element()],
+            Page::Typing => vec![self.insertion(config, cx).into_any_element()],
+            Page::Pill => vec![self.pill(config, cx).into_any_element()],
+            Page::System => vec![
+                self.system(config, cx).into_any_element(),
+                self.resources(cx).into_any_element(),
+            ],
+        }
+    }
+}
+
+/// A virtualized list on a group's raised surface, filling the space left on the page.
+fn listed(list: AnyElement, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .p_1()
+        .rounded(chrome::GROUP_RADIUS)
+        .bg(theme.secondary.opacity(0.45))
+        .border_1()
+        .border_color(theme.border.opacity(0.6))
+        .child(list)
+        .into_any_element()
 }
 
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let config = self.store.read(cx).config().clone();
-        let content = div()
+        let page = self.page;
+        let heading = div()
+            .flex_none()
             .flex()
             .flex_col()
-            .size_full()
+            .gap_1()
+            .pt_6()
+            .pb_4()
             .child(
-                Scroller::new("settings", &self.scrollbar).child(
+                div()
+                    .text_size(theme.text(Text::Title))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(page.title()),
+            )
+            .child(
+                div()
+                    .text_size(theme.text(Text::Small))
+                    .text_color(theme.muted_foreground)
+                    .child(page.subtitle()),
+            );
+        let groups = self.page(&config, cx);
+        // The search page lays out its own lists, which scroll themselves, so it fills the
+        // height instead of sitting in the page scroller.
+        let body = match page {
+            Page::Find => div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .px_8()
+                .pb_6()
+                .child(heading)
+                .children(groups)
+                .into_any_element(),
+            _ => Scroller::new("settings", &self.scrollbar)
+                .child(
                     div()
                         .w_full()
-                        .max_w(px(WIDTH))
-                        .mx_auto()
-                        .px_6()
-                        .pb_6()
+                        .max_w(px(CONTENT))
+                        .px_8()
+                        .pb_8()
                         .flex()
                         .flex_col()
                         .gap_4()
-                        .child(self.header(cx))
-                        .child(self.models(&config, cx))
-                        .child(self.find(cx))
-                        .child(self.dictation(&config, cx))
-                        .child(self.style(&config, cx))
-                        .child(self.detection(&config, cx))
-                        .child(self.insertion(&config, cx))
-                        .child(self.pill(&config, cx))
-                        .child(self.system(&config, cx))
-                        .child(self.resources(cx)),
-                ),
+                        .child(heading)
+                        .children(groups),
+                )
+                .into_any_element(),
+        };
+        let content = div()
+            .flex()
+            .size_full()
+            .child(self.sidebar(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(body),
             )
             .into_any_element();
         chrome::frame("Settings", content, window, cx)
