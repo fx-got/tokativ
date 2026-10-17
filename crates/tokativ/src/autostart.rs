@@ -4,19 +4,15 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use tokativ_config::APP_ID;
+use tokativ_config::{APP_ID, autostart_dir};
 
-fn entry() -> Option<PathBuf> {
-    Some(
-        dirs::config_dir()?
-            .join("autostart")
-            .join(format!("{APP_ID}.desktop")),
-    )
+fn entry() -> PathBuf {
+    autostart_dir().join(format!("{APP_ID}.desktop"))
 }
 
 /// Writes or removes the autostart entry so it matches `enabled`.
 pub fn apply(enabled: bool) -> Result<()> {
-    let path = entry().context("no config directory")?;
+    let path = entry();
     if !enabled {
         return match fs::remove_file(&path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {

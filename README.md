@@ -135,7 +135,11 @@ cargo clippy --workspace --all-targets
 ```
 
 `ort` is pinned to `2.0.0-rc.12` and linked against the onnxruntime from nixpkgs through
-`ORT_LIB_LOCATION`, which the dev shell sets. To try the whole pipeline without speaking, point
+`ORT_LIB_LOCATION`, which the dev shell sets. To work on the first-run flow, `cargo run -- sandbox` starts a
+throwaway daemon in `~/.local/state/tokativ/sandbox` with its own config, models and socket, fresh
+each time. `--with-models` links the models you already have instead of downloading them, and
+`--keep` picks up where the last run left off. Commands reach it with
+`TOKATIV_SANDBOX=~/.local/state/tokativ/sandbox tokativ toggle`. To try the whole pipeline without speaking, point
 `TOKATIV_INPUT_FILE` at a 16-bit mono WAV file. The daemon plays it in place of the microphone.
 `cargo run -p tokativ-engine --example file -- parakeet speech.wav` runs a 16 kHz file through the
 VAD and an engine and prints each phrase.

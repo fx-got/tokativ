@@ -695,8 +695,10 @@ impl Daemon {
         }
     }
 
+    /// Shows or hides the tray item. A sandboxed daemon never shows one, so the panel keeps a
+    /// single item for the real install.
     fn place_tray(&mut self, placed: bool, cx: &App) {
-        self.tray = match placed {
+        self.tray = match placed && tokativ_config::sandbox().is_none() {
             false => None,
             true => Tray::spawn(
                 self.tray_events.clone(),

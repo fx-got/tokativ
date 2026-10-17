@@ -266,7 +266,21 @@ impl Config {
     }
 }
 
+/// Names a folder to run the app in as if for a new user. Config, models, the autostart entry
+/// and the control socket all live under it, so the real install is never touched.
+pub const SANDBOX_VARIABLE: &str = "TOKATIV_SANDBOX";
+
+/// The sandbox folder when the app runs in one.
+pub fn sandbox() -> Option<PathBuf> {
+    std::env::var_os(SANDBOX_VARIABLE)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
 pub fn config_dir() -> PathBuf {
+    if let Some(sandbox) = sandbox() {
+        return sandbox.join("config");
+    }
     dirs::config_dir()
         .unwrap_or_else(|| home().join(".config"))
         .join(APP_ID)
@@ -278,14 +292,30 @@ pub fn config_path() -> PathBuf {
 
 /// Where downloaded models live, one folder per engine.
 pub fn models_dir() -> PathBuf {
+    if let Some(sandbox) = sandbox() {
+        return sandbox.join("models");
+    }
     dirs::data_dir()
         .unwrap_or_else(|| home().join(".local/share"))
         .join(APP_ID)
         .join("models")
 }
 
+/// Where the launch-at-login entry goes.
+pub fn autostart_dir() -> PathBuf {
+    if let Some(sandbox) = sandbox() {
+        return sandbox.join("autostart");
+    }
+    dirs::config_dir()
+        .unwrap_or_else(|| home().join(".config"))
+        .join("autostart")
+}
+
 /// The daemon's control socket. Falls back to the temp dir when there is no runtime dir.
 pub fn socket_path() -> PathBuf {
+    if let Some(sandbox) = sandbox() {
+        return sandbox.join(format!("{APP_ID}.sock"));
+    }
     dirs::runtime_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(format!("{APP_ID}.sock"))
