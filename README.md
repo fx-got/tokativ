@@ -20,9 +20,10 @@ speak.
 > [!NOTE]
 > The project is vibe-coded as hell.
 
-Speech is recognized on your machine, on the CPU, with
-[Parakeet v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (25 European languages) or
-[GigaAM v3](https://github.com/salute-developers/GigaAM) (Russian).
+Speech is recognized on your machine, on the graphics card through Vulkan or on the CPU, by
+[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp). Any of its GGUF models works, and
+settings can search Hugging Face for them: Parakeet, Whisper, Canary, GigaAM, Moonshine, Qwen3-ASR
+and more.
 
 ## Install
 
@@ -47,14 +48,12 @@ services.tokativ.enable = true;
 
 ### From source
 
-You need Rust 1.98, onnxruntime 1.24 or newer, pkg-config, cmake, and the development files for
-wayland, libxkbcommon, vulkan-loader, fontconfig, alsa-lib and openssl.
+You need Rust 1.98, a C++ compiler, cmake, pkg-config, glslc (from shaderc), and the development
+files for Vulkan, SPIRV-Headers, wayland, libxkbcommon, fontconfig, alsa-lib and openssl.
 
 ```sh
 git clone https://github.com/nolight132/tokativ
 cd tokativ
-export ORT_LIB_LOCATION=/usr/lib    # the folder that holds libonnxruntime.so
-export ORT_PREFER_DYNAMIC_LINK=1
 cargo build --release
 ./target/release/tokativ
 ```
