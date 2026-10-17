@@ -6848,6 +6848,7 @@ name = "tokativ-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "futures",
  "gpui",
  "icons",
