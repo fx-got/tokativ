@@ -166,7 +166,8 @@ pub fn installed() -> Vec<Installed> {
                         repo: repo.clone(),
                         file: name,
                     };
-                    let bytes = file.metadata().ok()?.len();
+                    // Through the link, if it is one, as the sandbox links models it borrows.
+                    let bytes = fs::metadata(file.path()).ok()?.len();
                     let info: Info = fs::read_to_string(id.info_path())
                         .ok()
                         .and_then(|text| serde_json::from_str(&text).ok())?;
