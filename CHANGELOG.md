@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
 ### Added
 
 - Tokativ runs on macOS and Windows. It listens for a hotkey of its own there, Option+Space on
@@ -18,11 +20,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   either, and settings say so.
 - The flake builds Tokativ on Apple silicon Macs, and its Home Manager module runs it there as a
   launchd agent.
+- Release builds for Linux, Windows and macOS on x86_64 and ARM64. macOS downloads include an
+  app bundle with microphone permission metadata.
+- An optional floating live caption on every platform, with smooth resizing, scrolling and
+  text morphing. New words sharpen from a blur, while outgoing lines fade away.
+- Spoken emoji names in over 140 languages, enabled by default in Writing style. Explicit
+  phrases such as "thumbs up emoji" become emoji locally, including flags and skin tones.
 
 ### Changed
 
 - Settings leave out the descriptions that only repeated a setting's name, and search results
   show how often a model was downloaded instead of its likes.
+- Model descriptions summarize each model's purpose without language-specific comparisons.
+
+### Fixed
+
+- Windows and macOS overlays no longer draw the system frame around their transparent surface.
+- The pill keeps its neutral background during errors, with a red indicator instead of a red fill.
+- Live captions render color emoji, preserve words when punctuation changes, and hide old lines
+  completely after scrolling settles. Shadows have enough room on Wayland surfaces.
 
 ## [0.2.0] - 2026-10-17
 
@@ -56,6 +72,7 @@ focused app as you speak.
 - A tray icon and a `tokativ` command line control the daemon.
 - The Home Manager module runs Tokativ as a user service and can fetch models at build time.
 
-[unreleased]: https://github.com/nolight132/tokativ/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/nolight132/tokativ/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/nolight132/tokativ/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nolight132/tokativ/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nolight132/tokativ/releases/tag/v0.1.0

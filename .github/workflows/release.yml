@@ -1,13 +1,18 @@
-name: release
+name: build and release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,6 +23,7 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -26,23 +32,41 @@ jobs:
             os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            msvc: x64
+            sdk_platform: windows
+            sdk_arch: X64
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            msvc: arm64
+            sdk_platform: warm
+            sdk_arch: ARM64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: name the artifact
         id: meta
         shell: bash
         run: |
+          set -euo pipefail
           case "$GITHUB_REF" in
             refs/tags/*) version="$GITHUB_REF_NAME" ;;
             *) version="${GITHUB_SHA:0:7}" ;;
           esac
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            package_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+            test "$version" = "v$package_version"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Ubuntu 22.04 keeps the glibc floor low but has no glslc and Vulkan headers too old
-      # for ggml's shaders, so those come from the nixpkgs the flake pins. The loader the
-      # binary links against stays Ubuntu's.
-      - name: system dependencies
+      # Keep the glibc 2.35 floor, while taking current shader tools/headers from pinned nixpkgs.
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -51,43 +75,153 @@ jobs:
             libxkbcommon-dev libwayland-dev libvulkan-dev
 
       - uses: DeterminateSystems/determinate-nix-action@v3
+        if: runner.os == 'Linux'
 
-      - name: vulkan toolchain
+      - name: Linux Vulkan toolchain
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           set -euo pipefail
           glslc="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#shaderc.bin)"
           headers="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#vulkan-headers)"
           spirv="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#spirv-headers)"
-          # GGML_NATIVE would tune the CPU code to this runner and crash on older processors, and
-          # the x86 runner carries a system BLAS the binary would then need on every machine.
           echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DVulkan_GLSLC_EXECUTABLE=$glslc/bin/glslc -DVulkan_INCLUDE_DIR=$headers/include -DCMAKE_PREFIX_PATH=$spirv" >> "$GITHUB_ENV"
-          # ggml finds SPIRV-Headers through CMake but includes spirv.hpp without linking them.
           echo "CPLUS_INCLUDE_PATH=$spirv/include" >> "$GITHUB_ENV"
 
-      - name: rust toolchain
-        run: rustup toolchain install
+      - name: macOS toolchain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --version
+          xcrun --find clang
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+          echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF" >> "$GITHUB_ENV"
+
+      - name: Windows Vulkan and C++ toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SDK_PLATFORM: ${{ matrix.sdk_platform }}
+          SDK_ARCH: ${{ matrix.sdk_arch }}
+          SDK_VERSION: 1.4.328.1
+          MSVC_ARCH: ${{ matrix.msvc }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $visualStudio = & $vswhere -latest -products '*' -property installationPath
+          if (!$visualStudio) { throw 'Visual Studio not found' }
+          Import-Module "$visualStudio\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $visualStudio -SkipAutomaticLocation -DevCmdArguments "-arch=$env:MSVC_ARCH -host_arch=$env:MSVC_ARCH"
+          foreach ($name in @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VCToolsInstallDir', 'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion', 'WindowsSdkVerBinPath', 'UniversalCRTSdkDir', 'UCRTVersion', 'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_HOST_ARCH')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" >> $env:GITHUB_ENV }
+          }
+          $sdk = "C:\VulkanSDK\$env:SDK_VERSION"
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk.exe'
+          $url = "https://sdk.lunarg.com/sdk/download/$env:SDK_VERSION/$env:SDK_PLATFORM/vulkansdk-windows-$env:SDK_ARCH-$env:SDK_VERSION.exe"
+          Invoke-WebRequest $url -OutFile $installer
+          $process = Start-Process $installer -ArgumentList @('--root', $sdk, '--accept-licenses', '--default-answer', '--confirm-command', 'install', 'copy_only=1') -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($process.ExitCode)" }
+          foreach ($file in @('Bin\glslc.exe', 'Include\vulkan\vulkan.h', 'Lib\vulkan-1.lib')) {
+            if (!(Test-Path (Join-Path $sdk $file))) { throw "Vulkan SDK missing $file" }
+          }
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          "$sdk\Bin" >> $env:GITHUB_PATH
+          # clang-cl permits an ARM baseline; MSVC's ggml ARM build requires host CPU probing.
+          "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
+          "CC=clang-cl" >> $env:GITHUB_ENV
+          "CXX=clang-cl" >> $env:GITHUB_ENV
+          "AWS_LC_SYS_PREBUILT_NASM=1" >> $env:GITHUB_ENV
+          "RUSTFLAGS=-C target-feature=+crt-static" >> $env:GITHUB_ENV
+          "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF" >> $env:GITHUB_ENV
+          Get-Command clang-cl, ninja, cmake
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$fxc) { throw 'Windows SDK fxc.exe not found' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      - name: native Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel-$TARGET" --profile minimal
+          rustup override set "$channel-$TARGET"
+          rustc -vV
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-${{ matrix.target }}
           cache-on-failure: true
 
       - name: build
+        shell: bash
         run: cargo build --release --locked --package tokativ --target ${{ matrix.target }}
 
-      - name: stage the executable
+      - name: stage and check Unix executable
+        if: runner.os != 'Windows'
+        shell: bash
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp "target/$TARGET/release/tokativ" "dist/tokativ-$VERSION-$TARGET"
-          ldd "dist/tokativ-$VERSION-$TARGET"
-          # The newest glibc symbol the binary asks for is the oldest distribution it runs on.
-          objdump -T "dist/tokativ-$VERSION-$TARGET" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+          executable="dist/tokativ-$VERSION-$TARGET"
+          cp "target/$TARGET/release/tokativ" "$executable"
+          chmod +x "$executable"
+          "$executable" --version
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            ldd "$executable"
+            objdump -T "$executable" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+          else
+            lipo -archs "$executable"
+            otool -L "$executable"
+            app="$RUNNER_TEMP/Tokativ.app"
+            mkdir -p "$app/Contents/MacOS"
+            cp "$executable" "$app/Contents/MacOS/tokativ"
+            app_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+            cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Tokativ</string>
+            <key>CFBundleDisplayName</key><string>Tokativ</string>
+            <key>CFBundleIdentifier</key><string>io.github.nolight132.tokativ</string>
+            <key>CFBundleExecutable</key><string>tokativ</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleVersion</key><string>$app_version</string>
+            <key>CFBundleShortVersionString</key><string>$app_version</string>
+            <key>LSUIElement</key><true/>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>Tokativ uses your microphone to transcribe speech on your device.</string>
+          </dict></plist>
+          PLIST
+            plutil -lint "$app/Contents/Info.plist"
+            codesign --force --deep --sign - "$app"
+            tar -czf "$executable.app.tar.gz" -C "$RUNNER_TEMP" Tokativ.app
+            rm "$executable"
+          fi
 
-      - uses: actions/upload-artifact@v4
+      - name: stage and check Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $executable = "dist/tokativ-$env:VERSION-$env:TARGET.exe"
+          Copy-Item "target/$env:TARGET/release/tokativ.exe" $executable
+          $process = Start-Process (Resolve-Path $executable) -ArgumentList '--version' -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode -ne 0) { throw "Executable exited with $($process.ExitCode)" }
+          dumpbin /headers $executable
+
+      - uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
           path: dist/*
@@ -100,9 +234,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: release-*
           path: dist
@@ -118,12 +252,12 @@ jobs:
           cp assets/fonts/LICENSE.txt licenses/LICENSE.Inter
           cp assets/silero/LICENSE licenses/LICENSE.silero-vad
           cp assets/icons/LICENSE licenses/LICENSE.lucide
+          cp assets/emoji/LICENSE licenses/LICENSE.Unicode
           tar -czf "dist/tokativ-$VERSION-licenses.tar.gz" -C licenses .
 
       - name: checksums
-        run: cd dist && shasum -a 256 * > SHA256SUMS
+        run: cd dist && shasum -a 256 -- * > SHA256SUMS
 
-      # The notes are the tag's section of the changelog, without its heading.
       - name: release notes
         env:
           NUMBER: ${{ github.ref_name }}
@@ -137,6 +271,7 @@ jobs:
             found { print }
           ' CHANGELOG.md > notes.md
           test -s notes.md
+          test "$(find dist -maxdepth 1 -name 'tokativ-*' ! -name '*licenses*' | wc -l)" -eq 6
 
       - uses: softprops/action-gh-release@v2
         with:
