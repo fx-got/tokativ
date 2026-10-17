@@ -8,6 +8,7 @@ pub mod pill;
 mod radius;
 pub mod settings;
 pub mod setup;
+mod usage;
 
 use gpui::App;
 use ui::{Look, Rounding, Theme, ThemeKind};

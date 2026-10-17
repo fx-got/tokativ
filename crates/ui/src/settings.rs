@@ -3,7 +3,7 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Window,
+    AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Task, Window,
     WindowHandle, div, px,
 };
 use tokativ_config::{Backend, Config, Model, PillEdge};
@@ -14,6 +14,7 @@ use ui::{
 
 use crate::chrome::{self, group, meter, row};
 use crate::host::{Host, Library, ModelState, Status, Store};
+use crate::usage::{Sampler, Usage};
 
 const WIDTH: f32 = 640.;
 const HEIGHT: f32 = 760.;
@@ -22,6 +23,8 @@ const SILENCE_MS: (f32, f32) = (200., 2000.);
 const THRESHOLD: (f32, f32) = (0.2, 0.9);
 const MARGIN: (f32, f32) = (0., 240.);
 const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
+/// How often the resources group reads the daemon's footprint.
+const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The tallest the microphone menu grows before it scrolls, about seven rows.
 const DEVICE_MENU_HEIGHT: gpui::Pixels = px(300.);
 
@@ -74,6 +77,8 @@ pub struct Settings {
     devices: Vec<tokativ_audio::InputDevice>,
     scrollbar: Entity<Scrollbar>,
     device_scrollbar: Entity<Scrollbar>,
+    usage: Usage,
+    _sampling: Task<()>,
 }
 
 impl Settings {
@@ -99,6 +104,21 @@ impl Settings {
             devices: tokativ_audio::input_devices(),
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
+            usage: Usage::default(),
+            _sampling: cx.spawn(async move |this, cx| {
+                let mut sampler = Sampler::default();
+                loop {
+                    let usage = sampler.sample();
+                    let open = this.update(cx, |this, cx| {
+                        this.usage = usage;
+                        cx.notify();
+                    });
+                    if open.is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(SAMPLE_EVERY).await;
+                }
+            }),
         }
     }
 
@@ -391,6 +411,43 @@ impl Settings {
     }
 
     /// The models to choose from. Clicking a downloaded one makes it the one sessions use.
+    /// The daemon's own memory and processor use, refreshed every second.
+    fn resources(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let value = |text: String| {
+            div()
+                .text_size(theme.text(Text::Small))
+                .text_color(theme.muted_foreground)
+                .child(text)
+                .into_any_element()
+        };
+        let memory = chrome::size(self.usage.memory);
+        let cpu = match self.usage.cpu {
+            Some(cpu) => format!("{cpu:.0}% of a core"),
+            None => "Measuring".to_string(),
+        };
+        group(
+            "Resources",
+            vec![
+                row(
+                    "Memory",
+                    "Mostly the loaded models. Unloading them when idle frees it.",
+                    value(memory),
+                    cx,
+                )
+                .into_any_element(),
+                row(
+                    "Processor",
+                    "Over the last second. Close to nothing between sessions.",
+                    value(cpu),
+                    cx,
+                )
+                .into_any_element(),
+            ],
+            cx,
+        )
+    }
+
     fn models(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
         let library = self.library.read(cx);
         let rows: Vec<_> = Model::ALL
@@ -600,7 +657,8 @@ impl Render for Settings {
                         .child(self.detection(&config, cx))
                         .child(self.insertion(&config, cx))
                         .child(self.pill(&config, cx))
-                        .child(self.system(&config, cx)),
+                        .child(self.system(&config, cx))
+                        .child(self.resources(cx)),
                 ),
             )
             .into_any_element();

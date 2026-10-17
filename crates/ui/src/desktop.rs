@@ -107,18 +107,10 @@ impl Desktop {
     /// The text to add, in the config's own syntax.
     pub fn snippet(self) -> &'static str {
         match self {
-            Self::Niri => {
-                "Mod+D { spawn \"tokativ\" \"toggle\"; }"
-            }
-            Self::Hyprland => {
-                "bind = SUPER, D, exec, tokativ toggle"
-            }
-            Self::Sway => {
-                "bindsym $mod+d exec tokativ toggle"
-            }
-            Self::River => {
-                "riverctl map normal Super D spawn 'tokativ toggle'"
-            }
+            Self::Niri => "Mod+D { spawn \"tokativ\" \"toggle\"; }",
+            Self::Hyprland => "bind = SUPER, D, exec, tokativ toggle",
+            Self::Sway => "bindsym $mod+d exec tokativ toggle",
+            Self::River => "riverctl map normal Super D spawn 'tokativ toggle'",
             Self::Plasma | Self::Gnome | Self::Unknown => "tokativ toggle",
         }
     }

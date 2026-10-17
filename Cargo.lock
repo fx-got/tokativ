@@ -6853,6 +6853,7 @@ dependencies = [
  "gpui",
  "icons",
  "log",
+ "rustix 1.1.5",
  "tokativ-audio",
  "tokativ-config",
  "tokativ-engine",
