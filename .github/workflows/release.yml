@@ -58,8 +58,9 @@ jobs:
           glslc="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#shaderc.bin)"
           headers="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#vulkan-headers)"
           spirv="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#spirv-headers)"
-          # GGML_NATIVE would tune the CPU code to this runner and crash on older processors.
-          echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DVulkan_GLSLC_EXECUTABLE=$glslc/bin/glslc -DVulkan_INCLUDE_DIR=$headers/include -DCMAKE_PREFIX_PATH=$spirv" >> "$GITHUB_ENV"
+          # GGML_NATIVE would tune the CPU code to this runner and crash on older processors, and
+          # the x86 runner carries a system BLAS the binary would then need on every machine.
+          echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DVulkan_GLSLC_EXECUTABLE=$glslc/bin/glslc -DVulkan_INCLUDE_DIR=$headers/include -DCMAKE_PREFIX_PATH=$spirv" >> "$GITHUB_ENV"
           # ggml finds SPIRV-Headers through CMake but includes spirv.hpp without linking them.
           echo "CPLUS_INCLUDE_PATH=$spirv/include" >> "$GITHUB_ENV"
 
