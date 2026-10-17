@@ -11,7 +11,10 @@ focused app as you speak.
 [![Nix](https://img.shields.io/badge/nix-flake-2b2b33?style=flat-square&logo=nixos)](#install)
 [![Platforms](https://img.shields.io/badge/runs%20on-linux%20%7C%20macos%20%7C%20windows-2b2b33?style=flat-square)](#install)
 
-<img src="docs/preview-glow.png" alt="The Tokativ pill while dictating" width="900">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/preview-dark.png">
+  <img src="docs/preview-light.png" alt="The Tokativ pill and live caption while dictating" width="900">
+</picture>
 <br>
 <br>
 
