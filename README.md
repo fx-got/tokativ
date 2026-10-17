@@ -51,9 +51,38 @@ From source you need Rust 1.98, a C++ compiler, cmake, pkg-config, glslc, and th
 for Vulkan, SPIRV-Headers, wayland, libxkbcommon, fontconfig, alsa-lib and openssl. Then
 `cargo build --release`.
 
-macOS and Windows have no release binaries yet, so without Nix build it there with Rust 1.98, cmake
-and a C++ compiler: the Xcode command line tools on macOS, and the Visual Studio Build Tools with the
-Vulkan SDK on Windows. Then `cargo build --release` and run `target/release/tokativ`.
+macOS and Windows have no release binaries yet. On macOS, a source build needs Rust, CMake and the
+Xcode command line tools: `cargo build --release`, then `target/release/tokativ`.
+
+On Windows x64, install these before building:
+
+- [Rust through rustup](https://rust-lang.org/tools/install/) with the MSVC toolchain. The checkout
+  selects the Rust version from `rust-toolchain.toml` automatically.
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/), with
+  **Desktop development with C++**, the x64 MSVC tools and a Windows SDK. GPUI's release build uses
+  `fxc.exe` from that SDK.
+- [CMake](https://cmake.org/download/) and [NASM](https://www.nasm.us/), both on `PATH`.
+- [Vulkan SDK](https://vulkan.lunarg.com/sdk/home#windows), including `glslc`.
+
+Open a new **Developer PowerShell for Visual Studio** after installation so it sees `VULKAN_SDK`
+and the updated `PATH`. From a short checkout path, such as `C:\src\tokativ`:
+
+```powershell
+git clone https://github.com/nolight132/tokativ.git
+cd tokativ
+cargo build --release --locked
+.\target\release\tokativ.exe
+```
+
+The first launch opens setup to download a model and choose a microphone. The default hotkey is
+Ctrl+Alt+Space. To update an existing build, quit Tokativ before rebuilding its executable:
+
+```powershell
+.\target\release\tokativ.exe quit
+git pull
+cargo build --release --locked
+.\target\release\tokativ.exe
+```
 
 ## Use
 

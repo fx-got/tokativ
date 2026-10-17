@@ -84,7 +84,7 @@ pub enum Phase {
     Listening,
     /// Capture has stopped and the last segments are being transcribed.
     Processing,
-    /// Something failed. The pill tints red and closes itself shortly after.
+    /// Something failed. The indicator turns red and the pill closes shortly after.
     Error,
 }
 
@@ -304,11 +304,12 @@ impl Render for Pill {
         let radius = HEIGHT / 2.;
         let button = nested_radius(radius, PADDING) * 2.;
         let error = self.phase == Phase::Error;
-        let surface = match error {
-            true => mix(theme.background, theme.danger, 0.35),
-            false => theme.background,
-        };
-        let bar_color = theme.foreground.opacity(self.intensity());
+        // Keep the capsule's neutral surface in every phase; errors tint only the indicator.
+        let bar_color = match error {
+            true => theme.danger,
+            false => theme.foreground,
+        }
+        .opacity(self.intensity());
         let shown = self.shown;
         let reveal = self.reveal();
         let on_confirm = self.on_confirm.clone();
@@ -352,7 +353,7 @@ impl Render for Pill {
                 .justify_between()
                 .p(PADDING - BORDER)
                 .rounded(radius)
-                .bg(surface)
+                .bg(theme.background)
                 .border_1()
                 .border_color(theme.border)
                 .shadow_lg()
@@ -450,18 +451,6 @@ fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla) -> gpui::Div {
         )
         .size_full(),
     )
-}
-
-fn mix(from: Hsla, to: Hsla, amount: f32) -> Hsla {
-    let from = from.to_rgb();
-    let to = to.to_rgb();
-    gpui::Rgba {
-        r: from.r + (to.r - from.r) * amount,
-        g: from.g + (to.g - from.g) * amount,
-        b: from.b + (to.b - from.b) * amount,
-        a: from.a + (to.a - from.a) * amount,
-    }
-    .into()
 }
 
 #[cfg(test)]

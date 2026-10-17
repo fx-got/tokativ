@@ -51,8 +51,8 @@ pub(crate) fn options(
     options
 }
 
-/// Finishes an overlay window the platform made: no frame of its own on macOS, never activated
-/// by a click on Windows, and with `click_through` letting the pointer reach whatever is below.
+/// Removes system decoration from the overlay and keeps it from taking keyboard focus.
+/// With `click_through` the pointer reaches whatever is below.
 pub(crate) fn prepare(window: &mut Window, click_through: bool) {
     if click_through {
         window.set_input_region(Some(&[]));
@@ -60,7 +60,7 @@ pub(crate) fn prepare(window: &mut Window, click_through: bool) {
     #[cfg(target_os = "macos")]
     frameless(window, click_through);
     #[cfg(windows)]
-    never_activate(window, click_through);
+    prepare_windows(window, click_through);
 }
 
 /// A layer surface anchored to the focused output's edge.
@@ -136,12 +136,17 @@ fn frameless(window: &Window, click_through: bool) {
     native.setIgnoresMouseEvents(click_through);
 }
 
-/// Keeps a click on the overlay from making it the foreground window, which would take focus
-/// from the app being dictated into. GPUI's pop-up windows can still be activated on Windows.
-/// A click-through window is also made transparent to the pointer.
+/// GPUI uses a transparent pop-up, but DWM still draws a border around its rectangular surface.
+/// The pill/caption draw their own outline, corners and shadow; the native surface must not.
+/// Also prevent activation and let the pointer pass through a caption.
 #[cfg(windows)]
-fn never_activate(window: &Window, click_through: bool) {
+fn prepare_windows(window: &Window, click_through: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMSBT_NONE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+        DWMWA_NCRENDERING_POLICY, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE,
+        DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
         WS_EX_TRANSPARENT,
@@ -163,5 +168,20 @@ fn never_activate(window: &Window, click_through: bool) {
     unsafe {
         let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
         SetWindowLongPtrW(window, GWL_EXSTYLE, style | added as isize);
+        for (attribute, value) in [
+            (DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED as u32),
+            (DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE),
+            (DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND as u32),
+            (DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE as u32),
+        ] {
+            // All these attributes take a four-byte enum or COLORREF. Older Windows versions
+            // may reject the Windows 11 attributes; non-client rendering is disabled there too.
+            let _ = DwmSetWindowAttribute(
+                window,
+                attribute as u32,
+                (&value as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
     }
 }
