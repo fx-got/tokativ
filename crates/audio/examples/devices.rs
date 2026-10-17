@@ -1,7 +1,7 @@
 //! Prints the input devices the settings window offers, with the id the config stores. With
 //! `listen [id]` it records two seconds from a device and prints how loud it was.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokativ_audio::{Levels, Options, Recorder, Timing};
 
@@ -25,7 +25,13 @@ fn main() -> anyhow::Result<()> {
         progress: None,
     };
     let levels = Levels::default();
+    let started = Instant::now();
     let recorder = Recorder::start(options, None, levels.clone(), |_| {})?;
+    println!("device open after {:.0?}", started.elapsed());
+    while levels.loudness() <= -120. && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    println!("first audio after {:.0?}", started.elapsed());
     let mut loudest = 0f32;
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(50));

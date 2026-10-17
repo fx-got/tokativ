@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
-use cpal::{FromSample, SampleFormat, SizedSample};
+use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, SupportedBufferSize};
+
+/// How often the device delivers audio: every 20 ms.
+const FRAGMENTS_PER_SECOND: u32 = 50;
 
 /// Names a WAV file to play in place of the microphone, for testing a session end to end.
 pub const FILE_VARIABLE: &str = "TOKATIV_INPUT_FILE";
@@ -101,7 +104,14 @@ impl Capture {
             config.sample_format()
         );
 
-        let stream_config = config.config();
+        // Without a fixed size PulseAudio hands a record stream its audio in chunks of up to a
+        // couple of seconds, which holds back both the bars and the speech detection.
+        let mut stream_config = config.config();
+        let frames = rate / FRAGMENTS_PER_SECOND;
+        stream_config.buffer_size = BufferSize::Fixed(match config.buffer_size() {
+            SupportedBufferSize::Range { min, max } => frames.clamp(*min, *max),
+            SupportedBufferSize::Unknown => frames,
+        });
         let stream = match config.sample_format() {
             SampleFormat::F32 => build::<f32>(&device, &stream_config, channels, sink, failed),
             SampleFormat::I16 => build::<i16>(&device, &stream_config, channels, sink, failed),
