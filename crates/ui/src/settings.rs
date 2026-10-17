@@ -8,8 +8,8 @@ use gpui::{
 };
 use tokativ_config::{Backend, Config, Model, PillEdge};
 use ui::{
-    ActiveTheme as _, Button, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller, Scrubber,
-    ScrubberState, Switch, Text,
+    ActiveTheme as _, Button, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller,
+    Scrubber, ScrubberState, Switch, Text,
 };
 
 use crate::chrome::{self, group, meter, row};
@@ -22,6 +22,8 @@ const SILENCE_MS: (f32, f32) = (200., 2000.);
 const THRESHOLD: (f32, f32) = (0.2, 0.9);
 const MARGIN: (f32, f32) = (0., 240.);
 const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
+/// The tallest the microphone menu grows before it scrolls, about seven rows.
+const DEVICE_MENU_HEIGHT: gpui::Pixels = px(300.);
 pub(crate) const NIRI_BIND: &str =
     "Mod+D { spawn \"tokativ\" \"toggle\"; }\nMod+Shift+D { spawn \"tokativ\" \"cancel\"; }";
 
@@ -73,6 +75,7 @@ pub struct Settings {
     margin: Slider,
     devices: Vec<tokativ_audio::InputDevice>,
     scrollbar: Entity<Scrollbar>,
+    device_scrollbar: Entity<Scrollbar>,
 }
 
 impl Settings {
@@ -97,6 +100,7 @@ impl Settings {
             margin: Slider::new("margin"),
             devices: tokativ_audio::input_devices(),
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
+            device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
         }
     }
 
@@ -129,7 +133,7 @@ impl Settings {
             }))
         });
         let device_picker = Picker::new("device", &self.popovers, device_name)
-            .width(Picker::WIDE)
+            .menu(device_menu("device-menu", &self.device_scrollbar))
             .item(default_item)
             .items(device_items.collect::<Vec<_>>());
 
@@ -604,6 +608,15 @@ impl Render for Settings {
             .into_any_element();
         chrome::frame("Settings", content, window, cx)
     }
+}
+
+/// The menu a microphone picker opens: capped in height and scrolled with Sonora's scrollbar,
+/// since a machine can list many inputs.
+pub(crate) fn device_menu(id: &'static str, scrollbar: &Entity<Scrollbar>) -> Menu {
+    Menu::new(id)
+        .w(Picker::WIDE)
+        .max_h(DEVICE_MENU_HEIGHT)
+        .scrollbar(scrollbar.clone())
 }
 
 /// Where `value` sits in `range`, as a fraction from 0 to 1.

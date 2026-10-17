@@ -15,7 +15,7 @@ use ui::{
 
 use crate::chrome::{self, meter, section};
 use crate::host::{Action, Host, Library, ModelState, Status, Store};
-use crate::settings::{NIRI_BIND, model_row};
+use crate::settings::{NIRI_BIND, device_menu, model_row};
 
 const WIDTH: f32 = 600.;
 const HEIGHT: f32 = 560.;
@@ -79,6 +79,7 @@ pub struct Setup {
     monitor: Option<Recorder>,
     field: Entity<Input>,
     scrollbar: Entity<Scrollbar>,
+    device_scrollbar: Entity<Scrollbar>,
 }
 
 impl Setup {
@@ -104,6 +105,7 @@ impl Setup {
             monitor: None,
             field,
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
+            device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
         }
     }
 
@@ -236,7 +238,7 @@ impl Setup {
             ))
             .child(
                 Picker::new("setup-device", &self.popovers, name)
-                    .width(px(360.))
+                    .menu(device_menu("setup-device-menu", &self.device_scrollbar))
                     .items(items),
             )
             .child(meter(level, px(12.), cx))
