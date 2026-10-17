@@ -42,6 +42,7 @@ gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "439295d5c1e21
 icons = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
 ui = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
 regex = "1.12"
+unicode-segmentation = "1.13"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 sha2 = "0.10"
 # GGUF speech models through ggml. Each crate that uses it picks the graphics backend for its

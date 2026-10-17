@@ -1,13 +1,13 @@
 //! The caption beside the pill: what the session has said so far and a draft of the phrase being
 //! spoken, on any platform. It sits away from the screen edge, lets clicks through, and every
-//! new or changed word rises out of a blur on a spring.
+//! new or changed word morphs into place on a spring.
 
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AvailableSpace, Context, DisplayId, Hsla, Pixels, ScrollHandle, Size, SpringConfig, TextRun,
-    Window, WindowHandle, div, font, point, px,
+    Context, DisplayId, Hsla, Pixels, ScrollHandle, Size, SpringConfig, Window, WindowHandle, div,
+    point, px,
 };
 use tokativ_config::PillEdge;
 use ui::ActiveTheme as _;
@@ -15,43 +15,37 @@ use ui::ActiveTheme as _;
 use crate::overlay;
 use crate::pill;
 use crate::spring::Spring;
+use crate::text_morph::{LINE_HEIGHT, Morph, TextViewport, align};
 
 /// The caption's width, wider than the pill so a phrase has room.
 const WIDTH: Pixels = px(520.);
 /// Three readable lines in a card larger than the controls. Older lines move up out of view.
-const LINE_HEIGHT: Pixels = px(24.);
 const TEXT_HEIGHT: Pixels = px(72.);
-const TEXT_SIZE: Pixels = px(16.);
 const PADDING_X: Pixels = px(20.);
 const PADDING_Y: Pixels = px(14.);
 const BORDER: Pixels = px(1.);
-/// Draw and fade into the card's existing padding, so scrolling lines and word blur never
-/// meet a hard clip at the text area's edge. This does not add to the card's outer size.
+/// Room for word animations inside the original padding. Rows fade out completely
+/// before their letters reach the card's clip.
 const TEXT_BLEED: Pixels = px(10.);
 const RADIUS: Pixels = px(20.);
 /// The space between the pill and the caption.
 const GAP: Pixels = px(10.);
 const WORD_GAP: Pixels = px(5.);
-/// How far a word rises, and how blurred it starts, as it comes in.
-const WORD_RISE: Pixels = px(6.);
-const WORD_BLUR: Pixels = px(8.);
-const WORD_STAGGER: Duration = Duration::from_millis(30);
-const MAX_STAGGER: Duration = Duration::from_millis(180);
+const WORD_STAGGER: Duration = Duration::from_millis(16);
+const MAX_STAGGER: Duration = Duration::from_millis(64);
 /// Keep about this many words, removing only complete rows that have already scrolled away.
 const MAX_WORDS: usize = 128;
 /// The caption itself unfolding towards the pill and folding back.
 const FOLDED_SCALE: f32 = 0.9;
-const FOLDED_BLUR: Pixels = px(10.);
 const FOLDED_SHIFT: Pixels = px(10.);
-/// A soft bounce in position, with a separate, overdamped reveal so opacity and blur never
-/// snap to their endpoints when the positional spring first overshoots.
-const WORD: SpringConfig = SpringConfig::new(230., 24., 1.);
-const CLARITY: SpringConfig = SpringConfig::new(180., 28., 1.);
 const INK: SpringConfig = SpringConfig::new(160., 27., 1.);
+const REVEAL: SpringConfig = SpringConfig::new(300., 35., 1.);
+const NEW_WORD_BLUR: Pixels = px(6.);
 /// Damped enough to resize without overshooting the text's required bounds.
 const RESIZE: SpringConfig = SpringConfig::new(210., 30., 1.);
 /// Scroll the existing lines together, with no bounce past the last line.
-const SCROLL: SpringConfig = SpringConfig::new(210., 30., 1.);
+const SCROLL: SpringConfig = SpringConfig::new(520., 46., 1.);
+const REFLOW: SpringConfig = SpringConfig::new(520., 46., 1.);
 const OPEN: SpringConfig = SpringConfig::new(320., 22., 1.);
 const CLOSE: SpringConfig = SpringConfig::new(520., 44., 1.);
 /// The longest a close may take before the window goes regardless.
@@ -61,8 +55,12 @@ const CLOSE_LIMIT: Duration = Duration::from_millis(600);
 struct Word {
     index: usize,
     text: String,
-    arrival: Spring,
-    clarity: Spring,
+    morph: Morph,
+    /// Runs once when a word first enters the caption; revisions only retarget its morph.
+    reveal: Spring,
+    x: Spring,
+    y: Spring,
+    placed: bool,
     /// 0 for the draft's muted color, 1 for committed text. Carries its velocity across updates.
     ink: Spring,
     delay: Duration,
@@ -79,6 +77,7 @@ pub struct Caption {
     /// Text always wraps at its final width, independently of the animated background.
     content_size: Option<Size<Pixels>>,
     layout_dirty: bool,
+    layout_width: Option<Pixels>,
     closing: Option<Instant>,
     beat: Option<Instant>,
 }
@@ -100,7 +99,7 @@ pub fn open(
         TEXT_HEIGHT + PADDING_Y * 2. + BORDER * 2. + pill::SHADOW * 2.,
     );
     // The caption starts where the pill ends, and its window starts a shadow's width earlier.
-    let offset = (px(margin) - pill::SHADOW).max(Pixels::ZERO) + pill::HEIGHT + GAP;
+    let offset = px(margin) - pill::SHADOW + pill::HEIGHT + GAP;
     let options = overlay::options(edge, offset, size, display, cx);
     cx.open_window(options, move |window, cx| {
         overlay::prepare(window, true);
@@ -120,6 +119,7 @@ impl Caption {
             scroll_handle: ScrollHandle::new(),
             content_size: None,
             layout_dirty: true,
+            layout_width: None,
             closing: None,
             beat: None,
         }
@@ -172,7 +172,7 @@ impl Caption {
         self.layout_dirty = false;
     }
 
-    fn trim_history(&mut self, metrics: &[Size<Pixels>], width: Pixels) {
+    fn trim_history(&mut self, metrics: &[Size<Pixels>], width: Pixels) -> usize {
         let excess = self.words.len().saturating_sub(MAX_WORDS);
         let (count, removed_height) = history_prefix(metrics, width, px(self.scroll.at()), excess);
         if count > 0 {
@@ -181,7 +181,51 @@ impl Caption {
             // ends of the spring without changing its velocity as offscreen rows are removed.
             self.scroll.state.position -= removed_height.as_f32();
             self.scroll.target -= removed_height.as_f32();
+            for word in &mut self.words {
+                if word.placed {
+                    word.y.state.position -= removed_height.as_f32();
+                    word.y.target -= removed_height.as_f32();
+                }
+            }
         }
+        count
+    }
+
+    /// Shape only changed words, and only when text or available width changes. The same
+    /// cached shapes supply layout and painting; animation frames do no text measurement.
+    fn layout(&mut self, window: &Window) {
+        let available =
+            (window.viewport_size().width - pill::SHADOW * 2. - PADDING_X * 2. - BORDER * 2.)
+                .max(px(1.));
+        if self.words.is_empty() || (!self.layout_dirty && self.layout_width == Some(available)) {
+            return;
+        }
+        let natural = self
+            .words
+            .iter_mut()
+            .map(|word| word.morph.natural_width(window))
+            .sum::<Pixels>()
+            + WORD_GAP * self.words.len().saturating_sub(1) as f32;
+        let width = (natural + px(1.)).min(available);
+        let mut metrics: Vec<_> = self
+            .words
+            .iter_mut()
+            .map(|word| word.morph.layout(width, window))
+            .collect();
+        let removed = self.trim_history(&metrics, width);
+        metrics.drain(..removed);
+        let (positions, height) = flow_layout(&metrics, width);
+        for (word, position) in self.words.iter_mut().zip(positions) {
+            word.x.aim(position.x.as_f32(), REFLOW);
+            word.y.aim(position.y.as_f32(), REFLOW);
+            if !word.placed {
+                word.x.finish();
+                word.y.finish();
+                word.placed = true;
+            }
+        }
+        self.resize(Size::new(width, height));
+        self.layout_width = Some(available);
     }
 
     /// Moves every spring on, or lands them all at once when motion is reduced. Returns whether
@@ -206,19 +250,28 @@ impl Caption {
             moving |= !spring.settled();
         }
         for word in &mut self.words {
-            if still {
+            for spring in [&mut word.x, &mut word.y] {
+                if still {
+                    spring.finish();
+                } else {
+                    spring.step(elapsed);
+                }
+                moving |= !spring.settled();
+            }
+            let morphing = if still {
                 word.delay = Duration::ZERO;
-                word.arrival.finish();
-                word.clarity.finish();
+                word.morph.finish();
+                word.reveal.finish();
                 word.ink.finish();
+                false
             } else {
                 let delay = word.delay.min(elapsed);
                 word.delay -= delay;
-                word.arrival.step(elapsed - delay);
-                word.clarity.step(elapsed - delay);
                 word.ink.step(elapsed);
-            }
-            moving |= !word.arrival.settled() || !word.clarity.settled() || !word.ink.settled();
+                word.reveal.step(elapsed - delay);
+                word.morph.step(elapsed - delay)
+            };
+            moving |= morphing || !word.ink.settled() || !word.reveal.settled();
         }
         moving
     }
@@ -226,99 +279,7 @@ impl Caption {
 
 impl Render for Caption {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        // Measure the same separate words the wrapping row draws. A short phrase hugs its
-        // content; only longer phrases reach the maximum width and wrap onto another line.
-        let word_widths: Vec<Pixels> = self
-            .words
-            .iter()
-            .map(|word| {
-                let run = TextRun {
-                    len: word.text.len(),
-                    font: font("Inter"),
-                    color: theme.foreground,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                window
-                    .text_system()
-                    .shape_line(word.text.clone().into(), TEXT_SIZE, &[run], None)
-                    .width
-                    // GPUI rounds each text element's intrinsic width up independently.
-                    // Summing unrounded advances could wrap a word while there is still
-                    // plenty of room to expand the card.
-                    .ceil()
-            })
-            .collect();
-        let text_width = word_widths.iter().copied().sum::<Pixels>()
-            + WORD_GAP * self.words.len().saturating_sub(1) as f32;
-        let width = (text_width + PADDING_X * 2. + BORDER * 2. + px(1.))
-            .min(window.viewport_size().width - pill::SHADOW * 2.);
-        let content_width = (width - PADDING_X * 2. - BORDER * 2.).max(px(1.));
-        if !self.words.is_empty()
-            && (self.layout_dirty
-                || self
-                    .content_size
-                    .is_none_or(|size| size.width != content_width))
-        {
-            if self.words.len() > MAX_WORDS {
-                let metrics: Vec<_> = self
-                    .words
-                    .iter()
-                    .zip(&word_widths)
-                    .map(|(word, &width)| {
-                        let height = if width > content_width {
-                            let run = TextRun {
-                                len: word.text.len(),
-                                font: font("Inter"),
-                                color: theme.foreground,
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            };
-                            window
-                                .text_system()
-                                .shape_text(
-                                    word.text.clone().into(),
-                                    TEXT_SIZE,
-                                    &[run],
-                                    Some(content_width),
-                                    None,
-                                )
-                                .map(|lines| {
-                                    lines.iter().map(|line| line.size(LINE_HEIGHT).height).sum()
-                                })
-                                .unwrap_or(LINE_HEIGHT)
-                        } else {
-                            LINE_HEIGHT
-                        };
-                        Size::new(width.min(content_width), height)
-                    })
-                    .collect();
-                self.trim_history(&metrics, content_width);
-            }
-            // Measure the final wrapping layout once per text change, using the same text
-            // elements and font as painting. Measuring the animated width would cause early
-            // line breaks and a changing height target on every frame.
-            let mut flow = text_flow(
-                &self.words,
-                content_width,
-                theme.foreground,
-                theme.muted_foreground,
-            )
-            .into_any_element();
-            let measured = flow.layout_as_root(
-                Size::new(
-                    AvailableSpace::Definite(content_width),
-                    AvailableSpace::MaxContent,
-                ),
-                window,
-                cx,
-            );
-            self.resize(Size::new(content_width, measured.height));
-        }
-
+        self.layout(window);
         let moving = self.step(cx.reduce_motion());
         if let Some(closing) = self.closing
             && (!moving || closing.elapsed() >= CLOSE_LIMIT)
@@ -333,9 +294,7 @@ impl Render for Caption {
         }
 
         let theme = cx.theme();
-        let content = self
-            .content_size
-            .unwrap_or(Size::new(content_width, LINE_HEIGHT));
+        let content = self.content_size.unwrap_or(Size::new(px(1.), LINE_HEIGHT));
         let body = self.body.at().clamp(0., 1.2);
         let shown = body.min(1.);
         // The caption grows out of the pill's side, so it moves in from there.
@@ -344,8 +303,11 @@ impl Render for Caption {
             PillEdge::Top => -FOLDED_SHIFT,
         };
         let unfolding = body != 1.;
-        self.scroll_handle
-            .set_offset(point(px(0.), -px(self.scroll.at())));
+        // Font rasterization snaps vertical glyph origins to device pixels. Scroll by whole
+        // device pixels first, then composite only the fractional remainder for smooth motion.
+        // The bleed covers this subpixel translation, including incoming rows.
+        let (scroll, translation) = scroll_position(px(self.scroll.at()), window.scale_factor());
+        self.scroll_handle.set_offset(point(px(0.), -scroll));
 
         let bubble = div()
             .w(px(self.width.at()).max(PADDING_X * 2. + BORDER * 2.))
@@ -359,9 +321,6 @@ impl Render for Caption {
             .border_color(theme.border)
             .shadow_lg()
             .overflow_hidden()
-            .text_size(TEXT_SIZE)
-            .line_height(LINE_HEIGHT)
-            .text_color(theme.foreground)
             .when(unfolding, |this| {
                 this.opacity((shown * 1.6).min(1.))
                     .layer_scale((FOLDED_SCALE + (1. - FOLDED_SCALE) * body).max(0.01))
@@ -373,7 +332,6 @@ impl Render for Caption {
                         },
                     ))
                     .layer_translate(point(px(0.), towards_pill * (1. - shown)))
-                    .when(shown < 1., |this| this.blur(FOLDED_BLUR * (1. - shown)))
             })
             .child(
                 // Scroll before painting/clipping, so incoming lines are rendered throughout
@@ -390,13 +348,14 @@ impl Render for Caption {
                     .overflow_hidden()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .fade_edges(TEXT_BLEED, TEXT_BLEED)
-                    .fade_sides(TEXT_BLEED, TEXT_BLEED)
+                    .when(!self.scroll.settled(), |this| {
+                        this.layer_translate(point(px(0.), translation))
+                    })
                     .flex()
                     .flex_col()
                     .child(text_flow(
-                        &self.words,
-                        content.width,
+                        self,
+                        content,
                         theme.foreground,
                         theme.muted_foreground,
                     )),
@@ -419,17 +378,60 @@ impl Render for Caption {
     }
 }
 
-fn text_flow(words: &[Word], width: Pixels, settled: Hsla, draft: Hsla) -> gpui::Div {
+fn text_flow(caption: &Caption, content: Size<Pixels>, settled: Hsla, draft: Hsla) -> gpui::Div {
+    let viewport = TextViewport {
+        scroll: caption.scroll_handle.clone(),
+        bleed: TEXT_BLEED,
+        size: content,
+        translation: -px(caption.scroll.at()) - caption.scroll_handle.offset().y,
+    };
     div()
         .flex_none()
-        .w(width)
-        .flex()
-        .flex_wrap()
-        .gap_x(WORD_GAP)
-        .font_family("Inter")
-        .text_size(TEXT_SIZE)
-        .line_height(LINE_HEIGHT)
-        .children(words.iter().map(|word| word_element(word, settled, draft)))
+        .relative()
+        .w(content.width)
+        .h(content.height + px(caption.scroll.target))
+        .children(caption.words.iter().map(|word| {
+            let blur = NEW_WORD_BLUR * (1. - word.reveal.at().clamp(0., 1.));
+            word.morph
+                .element(
+                    blend(draft, settled, word.ink.at().clamp(0., 1.)),
+                    &viewport,
+                    point(
+                        px(word.x.at() - word.x.target),
+                        px(word.y.at() - word.y.target),
+                    ),
+                )
+                .absolute()
+                .left(px(word.x.target))
+                .top(px(word.y.target))
+                .when(blur > px(0.), |this| this.blur(blur))
+        }))
+}
+
+fn scroll_position(position: Pixels, scale: f32) -> (Pixels, Pixels) {
+    let snapped = px((position.as_f32() * scale).round() / scale);
+    (snapped, snapped - position)
+}
+
+fn flow_layout(metrics: &[Size<Pixels>], width: Pixels) -> (Vec<gpui::Point<Pixels>>, Pixels) {
+    let mut used = Pixels::ZERO;
+    let mut row_height = Pixels::ZERO;
+    let mut total = Pixels::ZERO;
+    let mut positions = Vec::with_capacity(metrics.len());
+    for word in metrics {
+        if used > Pixels::ZERO && used + WORD_GAP + word.width > width {
+            total += row_height;
+            used = Pixels::ZERO;
+            row_height = Pixels::ZERO;
+        }
+        if used > Pixels::ZERO {
+            used += WORD_GAP;
+        }
+        positions.push(point(used, total));
+        used += word.width;
+        row_height = row_height.max(word.height);
+    }
+    (positions, total + row_height)
 }
 
 /// Find complete rows within both the history budget and the area already scrolled offscreen.
@@ -462,61 +464,64 @@ fn history_prefix(
     prefix
 }
 
-/// A word rising into place out of a blur. Once it has arrived it is drawn plainly, since any
-/// layer effect left on resamples it by a fraction of a pixel.
-fn word_element(word: &Word, settled: Hsla, draft: Hsla) -> impl IntoElement {
-    let arrived = word.arrival.at();
-    let clarity = word.clarity.at().clamp(0., 1.);
-    let coming = arrived != 1. || clarity != 1.;
-    let rest = 1. - clarity;
-    div()
-        .flex_none()
-        .max_w_full()
-        .text_color(blend(draft, settled, word.ink.at().clamp(0., 1.)))
-        .when(coming, |this| {
-            this.opacity(clarity)
-                .layer_translate(point(px(0.), WORD_RISE * (1. - arrived)))
-                .when(rest > 0., |this| this.blur(WORD_BLUR * rest))
-        })
-        .child(word.text.clone())
-}
-
 /// Keep springs for words whose text and position survive a draft revision or a final commit.
 /// Absolute indices also preserve them when old history is dropped from the front.
 fn reconcile(previous: Vec<Word>, written: &str, draft: &str) -> Vec<Word> {
-    let next = written
+    let next: Vec<_> = written
         .split_whitespace()
         .map(|word| (word, false))
-        .chain(draft.split_whitespace().map(|word| (word, true)));
+        .chain(draft.split_whitespace().map(|word| (word, true)))
+        .collect();
     // Keep the previous row boundary. Arbitrarily cutting to the last N words would rewrap
     // every remaining line and make visible text jump during a long session.
     let skip = previous.first().map_or(0, |word| word.index);
-    let mut old = previous.into_iter().peekable();
+    let skip = if skip >= next.len() { 0 } else { skip };
+    let next: Vec<_> = next.into_iter().enumerate().skip(skip).collect();
+    let old_keys: Vec<_> = previous.iter().map(|word| word_key(&word.text)).collect();
+    let next_keys: Vec<_> = next.iter().map(|(_, (text, _))| word_key(text)).collect();
+    let mut matched = align(&old_keys, &next_keys);
+    // Match unchanged words first, then pair replacements inside each gap. An insertion
+    // gets its own reveal; existing words retain their morph, color and reveal springs.
+    let anchors: Vec<_> = matched
+        .iter()
+        .enumerate()
+        .filter_map(|(new, old)| old.map(|old| (new, old)))
+        .chain(std::iter::once((next.len(), previous.len())))
+        .collect();
+    let (mut old_end, mut next_end) = (0, 0);
+    for (new, old) in anchors {
+        for (old_index, new_index) in (old_end..old).zip(next_end..new) {
+            matched[new_index] = Some(old_index);
+        }
+        old_end = old + 1;
+        next_end = new + 1;
+    }
+    let mut previous: Vec<_> = previous.into_iter().map(Some).collect();
     let mut delay = Duration::ZERO;
-    next.enumerate()
-        .skip(skip)
-        .map(|(index, (text, draft))| {
-            while old.peek().is_some_and(|word| word.index < index) {
-                old.next();
-            }
-            if old.peek().is_some_and(|word| word.index == index) {
-                let mut word = old.next().expect("index checked above");
-                if word.text == text {
-                    word.ink.aim(if draft { 0. } else { 1. }, INK);
-                    return word;
+    next.into_iter()
+        .zip(matched)
+        .map(|((index, (text, draft)), matched)| {
+            if let Some(mut word) = matched.and_then(|index| previous[index].take()) {
+                word.index = index;
+                if word.text != text {
+                    word.text = text.to_owned();
+                    word.morph.retarget(text);
                 }
+                word.ink.aim(if draft { 0. } else { 1. }, INK);
+                return word;
             }
-            let mut arrival = Spring::new(WORD);
-            arrival.aim(1., WORD);
-            let mut clarity = Spring::new(CLARITY);
-            clarity.aim(1., CLARITY);
             let mut ink = Spring::new(INK);
             ink.aim(if draft { 0. } else { 1. }, INK);
+            let mut reveal = Spring::new(REVEAL);
+            reveal.aim(1., REVEAL);
             let word = Word {
                 index,
                 text: text.to_owned(),
-                arrival,
-                clarity,
+                morph: Morph::new(text),
+                reveal,
+                x: Spring::new(REFLOW),
+                y: Spring::new(REFLOW),
+                placed: false,
                 ink,
                 delay,
             };
@@ -524,6 +529,30 @@ fn reconcile(previous: Vec<Word>, written: &str, draft: &str) -> Vec<Word> {
             word
         })
         .collect()
+}
+
+fn word_key(text: &str) -> &str {
+    let key = text.trim_end_matches(|ch: char| {
+        ch.is_ascii_punctuation()
+            || matches!(
+                ch,
+                '…' | '。'
+                    | '、'
+                    | '，'
+                    | '！'
+                    | '？'
+                    | '：'
+                    | '；'
+                    | '»'
+                    | '”'
+                    | '’'
+                    | '）'
+                    | '】'
+                    | '」'
+                    | '』'
+            )
+    });
+    if key.is_empty() { text } else { key }
 }
 
 fn blend(from: Hsla, to: Hsla, progress: f32) -> Hsla {
@@ -541,6 +570,61 @@ fn blend(from: Hsla, to: Hsla, progress: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolling_keeps_the_fraction_that_font_rasterization_would_discard() {
+        for scale in [1., 1.25, 1.5, 2.] {
+            for offset in [0., 0.1, 0.5, 1.2, 23.9, 24.] {
+                let (snapped, translation) = scroll_position(px(offset), scale);
+                assert!(((-snapped + translation).as_f32() + offset).abs() < 0.00001);
+                assert!(translation.as_f32().abs() <= 0.5 / scale + 0.00001);
+            }
+        }
+    }
+
+    #[test]
+    fn only_new_words_start_blurred_and_punctuation_keeps_the_existing_reveal() {
+        let mut words = reconcile(Vec::new(), "", "Привет");
+        words[0].reveal.finish();
+        words[0].morph.finish();
+        let words = reconcile(words, "Привет,", "мир");
+        assert_eq!(words[0].reveal.at(), 1.);
+        assert!(words[0].reveal.settled());
+        assert_eq!(words[1].reveal.at(), 0.);
+        assert!(!words[1].reveal.settled());
+    }
+
+    #[test]
+    fn inserting_a_word_does_not_restart_the_words_after_it() {
+        let mut words = reconcile(Vec::new(), "", "Мы любим Rust");
+        for word in &mut words {
+            word.reveal.finish();
+            word.morph.finish();
+        }
+        let words = reconcile(words, "", "Мы, очень любим Rust.");
+        assert_eq!(words[1].text, "очень");
+        assert_eq!(words[1].reveal.at(), 0.);
+        for index in [0, 2, 3] {
+            assert!(words[index].reveal.settled());
+            assert_eq!(words[index].reveal.at(), 1.);
+        }
+        assert!(words[2].morph.settled());
+        assert_eq!(words[2].index, 2);
+    }
+
+    #[test]
+    fn wrapping_uses_the_full_available_width_before_adding_a_line() {
+        let metrics = [
+            Size::new(px(100.), LINE_HEIGHT),
+            Size::new(px(140.), LINE_HEIGHT),
+        ];
+        let (positions, height) = flow_layout(&metrics, px(245.));
+        assert_eq!(height, LINE_HEIGHT);
+        assert_eq!(positions[1], point(px(105.), px(0.)));
+        let (positions, height) = flow_layout(&metrics, px(244.));
+        assert_eq!(height, LINE_HEIGHT * 2.);
+        assert_eq!(positions[1], point(px(0.), LINE_HEIGHT));
+    }
 
     #[test]
     fn overflowing_lines_scroll_without_jumping_or_restarting_the_motion() {
@@ -667,13 +751,11 @@ mod tests {
     fn committing_a_draft_changes_only_its_color_target() {
         let mut words = reconcile(Vec::new(), "", "Привет мир");
         for word in &mut words {
-            word.arrival.finish();
-            word.clarity.finish();
+            word.morph.finish();
         }
         let mut words = reconcile(words, "Привет мир", "");
         for word in &mut words {
-            assert_eq!(word.arrival.at(), 1.);
-            assert_eq!(word.clarity.at(), 1.);
+            assert!(word.morph.settled());
             assert_eq!(word.ink.at(), 0.);
             assert_eq!(word.ink.target, 1.);
             word.ink.step(Duration::from_millis(100));
@@ -685,8 +767,7 @@ mod tests {
     fn revising_a_word_keeps_the_other_words_and_their_color_in_motion() {
         let mut words = reconcile(Vec::new(), "One", "small step");
         for word in &mut words {
-            word.arrival.finish();
-            word.clarity.finish();
+            word.morph.finish();
         }
         words[0].ink.step(Duration::from_millis(100));
         let color = words[0].ink.at();
@@ -694,15 +775,13 @@ mod tests {
         let words = reconcile(words, "One", "giant step");
         assert_eq!(words[0].ink.at(), color);
         assert_eq!(words[0].ink.state.velocity, velocity);
-        assert_eq!(words[1].arrival.at(), 0.);
-        assert_eq!(words[1].clarity.at(), 0.);
-        assert_eq!(words[2].arrival.at(), 1.);
-        assert_eq!(words[2].clarity.at(), 1.);
+        assert!(!words[1].morph.settled());
+        assert!(words[2].morph.settled());
     }
 
     #[test]
-    fn clarity_and_color_approach_their_endpoints_without_reversing() {
-        for config in [CLARITY, INK] {
+    fn color_and_scroll_approach_their_endpoints_without_reversing() {
+        for config in [SCROLL, INK] {
             for hz in [30, 60, 120, 144] {
                 let mut spring = Spring::new(config);
                 spring.aim(1., config);
@@ -724,13 +803,13 @@ mod tests {
             .join(" ");
         let mut words = reconcile(Vec::new(), &text, "");
         for word in &mut words {
-            word.arrival.finish();
+            word.morph.finish();
         }
         let words = reconcile(words, &text, "new");
         assert_eq!(words.len(), MAX_WORDS + 1);
         assert_eq!(words[0].index, 0);
-        assert_eq!(words[0].arrival.at(), 1.);
+        assert!(words[0].morph.settled());
         assert_eq!(words.last().unwrap().text, "new");
-        assert_eq!(words.last().unwrap().arrival.at(), 0.);
+        assert!(!words.last().unwrap().morph.settled());
     }
 }

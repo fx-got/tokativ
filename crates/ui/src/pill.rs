@@ -26,8 +26,9 @@ const PADDING: Pixels = px(PADDING_PX);
 /// The pill's outline, which counts towards the padding so the buttons sit exactly `PADDING`
 /// from the outer edge.
 const BORDER: Pixels = px(1.);
-/// Room around the pill for its shadow. Clicks there fall through to whatever is below.
-pub(crate) const SHADOW: Pixels = px(14.);
+/// Covers shadow_lg's offset and full Gaussian tail (10 - 3 + 3 * 15 = 52px),
+/// plus room for the opening spring. Clicks in this margin pass through.
+pub(crate) const SHADOW: Pixels = px(56.);
 const BARS: usize = BANDS;
 const BAR_WIDTH_PX: f32 = 3.;
 const BAR_GAP_PX: f32 = 4.;
@@ -127,7 +128,7 @@ pub fn open(
 ) -> anyhow::Result<WindowHandle<Pill>> {
     let size = Size::new(WIDTH + SHADOW * 2., HEIGHT + SHADOW * 2.);
     // The shadow margin is part of the surface, so the visible gap to the edge takes it off.
-    let gap = (px(margin) - SHADOW).max(Pixels::ZERO);
+    let gap = px(margin) - SHADOW;
     let options = overlay::options(edge, gap, size, None, cx);
     let on_confirm: Handler = Rc::new(on_confirm);
     let on_cancel: Handler = Rc::new(on_cancel);

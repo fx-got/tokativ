@@ -15,6 +15,7 @@ mod radius;
 pub mod settings;
 pub mod setup;
 mod spring;
+mod text_morph;
 mod usage;
 
 use gpui::App;

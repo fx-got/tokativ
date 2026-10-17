@@ -7217,6 +7217,7 @@ dependencies = [
  "tokativ-config",
  "tokativ-engine",
  "ui",
+ "unicode-segmentation",
  "windows-sys 0.61.2",
 ]
 
