@@ -19,7 +19,9 @@ pub struct InputDevice {
     pub name: String,
 }
 
-/// The input devices on the default host.
+/// The inputs worth dictating into: the sound server's sources, hardware and the virtual ones a
+/// user set up on purpose, such as a noise filter. Monitors of outputs are left out, since they
+/// carry what the computer plays rather than what anyone says.
 pub fn input_devices() -> Vec<InputDevice> {
     let host = cpal::default_host();
     let Ok(devices) = host.input_devices() else {
@@ -28,6 +30,9 @@ pub fn input_devices() -> Vec<InputDevice> {
     devices
         .filter_map(|device| {
             let id = device.id().ok()?.to_string();
+            if id.ends_with(".monitor") {
+                return None;
+            }
             let name = device
                 .description()
                 .map(|description| description.name().to_string())
@@ -171,7 +176,7 @@ where
     let mut mono = Vec::new();
     device
         .build_input_stream::<T, _, _>(
-            config,
+            *config,
             move |data, _| {
                 mono.clear();
                 mono.extend(data.chunks(channels).map(|frame| {

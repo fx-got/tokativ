@@ -21,7 +21,9 @@ env_logger = "0.11"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9"
-cpal = "0.17"
+# PulseAudio host for a list of the sound server's real sources. handy-cpal is cpal 0.18.2 with the
+# one-line record stream fix from RustAudio/cpal#1387, which plain 0.18.2 lacks.
+cpal = { package = "handy-cpal", version = "0.18.2", features = ["pulseaudio"] }
 rtrb = "0.3"
 rubato = "0.16"
 rustfft = "6.4"
