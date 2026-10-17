@@ -39,50 +39,18 @@ imports = [ inputs.tokativ.homeModules.default ];
 services.tokativ.enable = true;
 ```
 
-On Linux both install the binary from the latest
-[release](https://github.com/nolight132/tokativ/releases), built for x86_64 and aarch64 against glibc
-2.35, and `nix run github:nolight132/tokativ#tokativ-source` builds it from source instead. On Apple
-silicon Macs they build it from source, and Home Manager runs it as a launchd agent.
+On Linux both install the released binary; `nix run github:nolight132/tokativ#tokativ-source`
+builds from source. On Apple silicon Macs, Nix builds from source and Home Manager runs it as a
+launchd agent.
 
-On Linux without Nix, download the binary for your machine from the release and put it on your
-`PATH` as `tokativ`. It needs the Vulkan loader, wayland, libxkbcommon and alsa-lib.
+The [latest release](https://github.com/nolight132/tokativ/releases/latest) has x86_64 and ARM64
+builds for all three platforms:
 
-From source you need Rust 1.98, a C++ compiler, cmake, pkg-config, glslc, and the development files
-for Vulkan, SPIRV-Headers, wayland, libxkbcommon, fontconfig, alsa-lib and openssl. Then
-`cargo build --release`.
-
-macOS and Windows have no release binaries yet. On macOS, a source build needs Rust, CMake and the
-Xcode command line tools: `cargo build --release`, then `target/release/tokativ`.
-
-On Windows x64, install these before building:
-
-- [Rust through rustup](https://rust-lang.org/tools/install/) with the MSVC toolchain. The checkout
-  selects the Rust version from `rust-toolchain.toml` automatically.
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/), with
-  **Desktop development with C++**, the x64 MSVC tools and a Windows SDK. GPUI's release build uses
-  `fxc.exe` from that SDK.
-- [CMake](https://cmake.org/download/) and [NASM](https://www.nasm.us/), both on `PATH`.
-- [Vulkan SDK](https://vulkan.lunarg.com/sdk/home#windows), including `glslc`.
-
-Open a new **Developer PowerShell for Visual Studio** after installation so it sees `VULKAN_SDK`
-and the updated `PATH`. From a short checkout path, such as `C:\src\tokativ`:
-
-```powershell
-git clone https://github.com/nolight132/tokativ.git
-cd tokativ
-cargo build --release --locked
-.\target\release\tokativ.exe
-```
-
-The first launch opens setup to download a model and choose a microphone. The default hotkey is
-Ctrl+Alt+Space. To update an existing build, quit Tokativ before rebuilding its executable:
-
-```powershell
-.\target\release\tokativ.exe quit
-git pull
-cargo build --release --locked
-.\target\release\tokativ.exe
-```
+- **Windows:** download the `.exe` for your architecture and run it.
+- **macOS:** download the `.app.tar.gz` for Intel or Apple silicon, extract it, and move Tokativ
+  to Applications. Open it from the context menu on first launch; builds are not notarized.
+- **Linux:** download the binary, make it executable, and put it on your `PATH` as `tokativ`.
+  It needs glibc 2.35+, the Vulkan loader, Wayland, libxkbcommon and alsa-lib.
 
 ## Use
 
@@ -107,6 +75,24 @@ and “эмодзи красное сердце” with ❤️. It is on by defa
 Unicode 17 emoji catalogue with names in 140+ languages, including flags and skin tones.
 Say “emoji” or its local equivalent (such as “эмодзи”, “絵文字” or “이모지”) before or after the name.
 Names without an emoji command remain ordinary text.
+
+## Build from source
+
+Install Rust through rustup (the checkout selects its version), CMake and a C++ toolchain:
+
+- **Windows:** Visual Studio Build Tools with Desktop development with C++, a Windows SDK,
+  NASM and the Vulkan SDK. Use Developer PowerShell; for ARM64, use clang-cl and Ninja.
+- **macOS:** Xcode command line tools.
+- **Linux:** pkg-config, glslc and development packages for Vulkan, SPIRV-Headers, Wayland,
+  libxkbcommon, fontconfig, alsa-lib and OpenSSL. `nix develop` provides them.
+
+```sh
+git clone https://github.com/nolight132/tokativ.git
+cd tokativ
+cargo build --release --locked
+```
+
+Run `target/release/tokativ` (Windows: `.\target\release\tokativ.exe`).
 
 ## License
 
