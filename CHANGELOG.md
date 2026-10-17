@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-17
+
+### Changed
+
+- `nix run github:nolight132/tokativ` and the Home Manager module install the released binary
+  instead of compiling Tokativ. `nix run github:nolight132/tokativ#tokativ-source` still builds it
+  from source.
+
 ## [0.1.0] - 2026-10-17
 
 The first release. Bind `tokativ toggle` to a key, press it and talk, and the text appears in the
@@ -29,8 +37,8 @@ focused app as you speak.
 - A writing style rewrites each phrase before it is inserted. It decides how sentences start,
   whether the final period stays, how laughter is spelled, and which fixed phrases get replaced.
 - A tray icon and a `tokativ` command line control the daemon.
-- The flake installs the released binary, and its Home Manager module runs Tokativ as a user
-  service and can fetch models at build time.
+- The Home Manager module runs Tokativ as a user service and can fetch models at build time.
 
-[unreleased]: https://github.com/nolight132/tokativ/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/nolight132/tokativ/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/nolight132/tokativ/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nolight132/tokativ/releases/tag/v0.1.0
