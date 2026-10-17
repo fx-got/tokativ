@@ -48,20 +48,19 @@ Bind the toggle in your niri config:
 ```kdl
 binds {
     Mod+D { spawn "tokativ" "toggle"; }
-    Mod+Shift+D { spawn "tokativ" "cancel"; }
 }
 ```
 
 The first press opens the pill and starts listening. While you speak, a draft of the current
 phrase shows at the cursor as underlined text. Each time you pause for about half a second, the
 phrase is transcribed in full and inserted. The second press, Enter, or the check mark on the pill
-inserts whatever is left and closes it. Escape, the cross, or `tokativ cancel` drop anything not
-yet inserted. Text that has already gone in stays.
+inserts whatever is left and closes it. Escape or the cross drop anything not yet inserted. Text
+that has already gone in stays.
 
 Escape and Enter work because the session takes the keyboard through the input method protocol.
-Any other key goes on to the app and hands the keyboard back, so typing by hand mid-session
-behaves normally. Drafts and the two keys need the input method, so they are off when another
-input method such as fcitx5 is running.
+Every other key is passed on to the focused app, so typing by hand mid-session behaves normally.
+Drafts and the two keys need the input method, so they are off when another input method such as
+fcitx5 is running.
 
 ## Commands
 

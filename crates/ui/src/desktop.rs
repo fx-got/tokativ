@@ -108,16 +108,16 @@ impl Desktop {
     pub fn snippet(self) -> &'static str {
         match self {
             Self::Niri => {
-                "Mod+D { spawn \"tokativ\" \"toggle\"; }\nMod+Shift+D { spawn \"tokativ\" \"cancel\"; }"
+                "Mod+D { spawn \"tokativ\" \"toggle\"; }"
             }
             Self::Hyprland => {
-                "bind = SUPER, D, exec, tokativ toggle\nbind = SUPER SHIFT, D, exec, tokativ cancel"
+                "bind = SUPER, D, exec, tokativ toggle"
             }
             Self::Sway => {
-                "bindsym $mod+d exec tokativ toggle\nbindsym $mod+Shift+d exec tokativ cancel"
+                "bindsym $mod+d exec tokativ toggle"
             }
             Self::River => {
-                "riverctl map normal Super D spawn 'tokativ toggle'\nriverctl map normal Super+Shift D spawn 'tokativ cancel'"
+                "riverctl map normal Super D spawn 'tokativ toggle'"
             }
             Self::Plasma | Self::Gnome | Self::Unknown => "tokativ toggle",
         }
