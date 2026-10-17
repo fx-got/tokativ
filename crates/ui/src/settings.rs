@@ -62,7 +62,7 @@ pub fn open(cx: &mut App) {
             let mut settings = Settings::new(window, cx);
             let first = std::env::var(PAGE_VARIABLE)
                 .ok()
-                .and_then(|id| Page::ALL.into_iter().find(|page| page.id() == id));
+                .and_then(|id| Page::from_id(&id));
             if let Some(page) = first {
                 settings.go(page, window, cx);
             }
@@ -81,9 +81,7 @@ enum Page {
     Find,
     Dictation,
     Style,
-    Typing,
-    Pill,
-    System,
+    General,
 }
 
 impl Page {
@@ -94,20 +92,24 @@ impl Page {
             Self::Find => "find",
             Self::Dictation => "dictation",
             Self::Style => "style",
-            Self::Typing => "typing",
-            Self::Pill => "pill",
-            Self::System => "system",
+            Self::General => "general",
         }
     }
 
-    const ALL: [Self; 7] = [
+    fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "typing" => Some(Self::Dictation),
+            "pill" | "system" => Some(Self::General),
+            _ => Self::ALL.into_iter().find(|page| page.id() == id),
+        }
+    }
+
+    const ALL: [Self; 5] = [
         Self::Model,
         Self::Find,
         Self::Dictation,
         Self::Style,
-        Self::Typing,
-        Self::Pill,
-        Self::System,
+        Self::General,
     ];
 
     fn title(self) -> &'static str {
@@ -116,9 +118,7 @@ impl Page {
             Self::Find => "Find models",
             Self::Dictation => "Dictation",
             Self::Style => "Writing style",
-            Self::Typing => "Typing",
-            Self::Pill => "Pill",
-            Self::System => "System",
+            Self::General => "General",
         }
     }
 
@@ -128,9 +128,7 @@ impl Page {
             Self::Find => "icons/search.svg",
             Self::Dictation => "icons/mic-vocal.svg",
             Self::Style => "icons/pencil.svg",
-            Self::Typing => "icons/text-select.svg",
-            Self::Pill => "icons/palette.svg",
-            Self::System => "icons/settings.svg",
+            Self::General => "icons/settings.svg",
         }
     }
 }
@@ -438,7 +436,7 @@ impl Settings {
                     }),
             );
         group(
-            None,
+            Some("Typing"),
             vec![match note {
                 Some(note) => row("Method", note, picker.into_any_element(), cx).into_any_element(),
                 None => setting("Method", picker.into_any_element(), cx).into_any_element(),
@@ -468,7 +466,7 @@ impl Settings {
             .unwrap_or_else(|| fraction(config.pill.margin, MARGIN));
         let pixels = value(margin, MARGIN).round();
         group(
-            None,
+            Some("Pill"),
             vec![
                 setting("Position", picker.into_any_element(), cx).into_any_element(),
                 setting(
@@ -577,7 +575,7 @@ impl Settings {
                 .into_any_element(),
             );
         }
-        group(None, rows, cx)
+        group(Some("System"), rows, cx)
     }
 
     /// The rules that rewrite each phrase before it is inserted.
@@ -1183,11 +1181,11 @@ impl Settings {
             Page::Dictation => vec![
                 self.dictation(config, cx).into_any_element(),
                 self.detection(config, cx).into_any_element(),
+                self.insertion(config, cx).into_any_element(),
             ],
             Page::Style => vec![self.style(config, cx).into_any_element()],
-            Page::Typing => vec![self.insertion(config, cx).into_any_element()],
-            Page::Pill => vec![self.pill(config, cx).into_any_element()],
-            Page::System => vec![
+            Page::General => vec![
+                self.pill(config, cx).into_any_element(),
                 self.system(config, cx).into_any_element(),
                 self.resources(cx).into_any_element(),
             ],

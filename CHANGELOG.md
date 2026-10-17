@@ -16,6 +16,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Notifications wait until dictation finishes. Installations managed by a package manager keep
   their existing update method when they are not macOS app bundles.
 
+### Changed
+
+- Settings now have five pages: typing options live in Dictation, while pill appearance,
+  system options and resource usage share General.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added

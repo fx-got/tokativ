@@ -66,7 +66,7 @@ as F5 works on its own, any other key needs a modifier. macOS asks for Accessibi
 first time Tokativ types, and the text only arrives once it is allowed. Neither system lets another
 app put a draft at the cursor, so the text appears once each phrase is done.
 
-On every platform, **Settings → Pill → Live caption** adds a larger floating window with the
+On every platform, **Settings → General → Live caption** adds a larger floating window with the
 current draft and the latest dictated text. It sits below a top pill or above a bottom pill,
 and lets clicks through to the app underneath. It is on by default on macOS and Windows.
 
@@ -77,7 +77,7 @@ Say “emoji” or its local equivalent (such as “эмодзи”, “絵文�
 Names without an emoji command remain ordinary text.
 
 Windows and macOS check for updates and show a popup when a new version is available. You can
-also check from the tray menu or **Settings → System**. Updates keep your settings and models.
+also check from the tray menu or **Settings → General**. Updates keep your settings and models.
 
 ## Build from source
 
