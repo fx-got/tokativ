@@ -366,17 +366,6 @@ pub(crate) fn file_row(
         .into_any_element()
 }
 
-/// A muted line inside a group, for empty and waiting states.
-pub(crate) fn note(text: &str, cx: &App) -> AnyElement {
-    div()
-        .px(chrome::GROUP_PADDING)
-        .py_3()
-        .text_size(cx.theme().text(Text::Small))
-        .text_color(cx.theme().muted_foreground)
-        .child(text.to_owned())
-        .into_any_element()
-}
-
 /// A count as people read one: 1.9M, 640K, 812.
 fn count(value: u64) -> String {
     match value {

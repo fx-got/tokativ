@@ -848,11 +848,14 @@ impl Settings {
                     )
                     .track_scroll(&self.files_scroll)
                     .size_full();
-                    Scroller::listing("repository-files-scroll", &self.files_scrollbar)
-                        .child(rows)
-                        .into_any_element()
+                    listed(
+                        Scroller::listing("repository-files-scroll", &self.files_scrollbar)
+                            .child(rows)
+                            .into_any_element(),
+                        cx,
+                    )
                 }
-                None => models::note(&waiting.unwrap_or_default(), cx),
+                None => hint(&waiting.unwrap_or_default(), cx),
             };
             return div()
                 .flex()
@@ -860,7 +863,7 @@ impl Settings {
                 .gap_4()
                 .size_full()
                 .child(header)
-                .child(listed(list, cx))
+                .child(list)
                 .into_any_element();
         }
 
@@ -877,7 +880,7 @@ impl Settings {
         };
         let results = search.results.clone();
         let list = match note {
-            Some(note) => models::note(&note, cx),
+            Some(note) => hint(&note, cx),
             None => {
                 let count = results.len();
                 let rows = uniform_list(
@@ -902,9 +905,12 @@ impl Settings {
                 )
                 .track_scroll(&self.results_scroll)
                 .size_full();
-                Scroller::listing("search-results-scroll", &self.results_scrollbar)
-                    .child(rows)
-                    .into_any_element()
+                listed(
+                    Scroller::listing("search-results-scroll", &self.results_scrollbar)
+                        .child(rows)
+                        .into_any_element(),
+                    cx,
+                )
             }
         };
         div()
@@ -913,7 +919,7 @@ impl Settings {
             .gap_4()
             .size_full()
             .child(field)
-            .child(listed(list, cx))
+            .child(list)
             .into_any_element()
     }
 
@@ -1089,6 +1095,16 @@ fn listed(list: AnyElement, cx: &App) -> AnyElement {
         .border_1()
         .border_color(theme.border.opacity(0.6))
         .child(list)
+        .into_any_element()
+}
+
+/// A muted line under the search field, standing in for a list that has nothing to show yet.
+fn hint(text: &str, cx: &App) -> AnyElement {
+    div()
+        .px_1()
+        .text_size(cx.theme().text(Text::Small))
+        .text_color(cx.theme().muted_foreground)
+        .child(text.to_owned())
         .into_any_element()
 }
 
