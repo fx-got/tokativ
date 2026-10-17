@@ -221,7 +221,7 @@ impl Daemon {
             daemon.pill = daemon.open_pill(Levels::default(), &config, output, true, cx);
         });
 
-        let first_run = !config_path().exists() || !library.read(cx).any_installed();
+        let first_run = !config.setup_done || !library.read(cx).any_installed();
         if first_run {
             daemon.update(cx, |daemon, cx| daemon.open_setup(cx));
         }

@@ -136,6 +136,9 @@ pub struct Config {
     /// Show a draft of the phrase being spoken at the cursor before it is final. Needs the input
     /// method.
     pub live_preview: bool,
+    /// The setup window was finished. Until then it opens whenever the daemon starts, even
+    /// when choices made in it were already saved.
+    pub setup_done: bool,
 }
 
 impl Default for Config {
@@ -150,6 +153,7 @@ impl Default for Config {
             launch_at_login: false,
             tray: true,
             live_preview: true,
+            setup_done: false,
         }
     }
 }

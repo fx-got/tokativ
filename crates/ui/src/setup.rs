@@ -514,12 +514,9 @@ impl Setup {
 
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.monitor = None;
-        let config = self.store.read(cx).config().clone();
-        if !tokativ_config::config_path().exists()
-            && let Err(error) = config.save()
-        {
-            log::error!("setup: cannot save the config: {error:#}");
-        }
+        self.store.update(cx, |store, cx| {
+            store.update(|config| config.setup_done = true, cx)
+        });
         window.remove_window();
     }
 }
