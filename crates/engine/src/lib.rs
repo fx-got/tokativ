@@ -13,15 +13,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use tokativ_config::Processor;
-use transcribe_cpp::{Backend, ModelOptions, RunOptions, Session};
+use transcribe_cpp::{Backend, Feature, ModelOptions, RunOptions, Session};
 
 pub use models::ModelId;
 pub use text::{Joiner, restyle};
 
 /// A loaded speech-to-text model.
 pub trait Engine: Send {
-    /// Transcribes 16 kHz mono audio.
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String>;
+    /// Transcribes 16 kHz mono audio. Whatever part of `context` the model cannot use is left
+    /// out.
+    fn transcribe(&mut self, samples: &[f32], context: &Context) -> Result<String>;
 
     /// The languages the model understands, as ISO 639-1 codes. Empty when the model does not
     /// say.
@@ -29,7 +30,32 @@ pub trait Engine: Send {
 
     /// The device the model runs on.
     fn device(&self) -> Device;
+
+    /// Which parts of a [`Context`] the model takes.
+    fn abilities(&self) -> Abilities;
 }
+
+/// What a model is told besides the audio, to spell names and continue the text around it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Context {
+    /// Terms to spell as written, most important first.
+    pub vocabulary: Vec<String>,
+    /// The text just before where this phrase goes: what the field held left of the cursor and
+    /// the phrases already inserted this session.
+    pub before: String,
+}
+
+/// Which parts of a [`Context`] a model takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Abilities {
+    pub vocabulary: bool,
+    /// The text before the phrase, as a context prompt or as a transcript the model continues.
+    pub before: bool,
+}
+
+/// How much of the text before a phrase reaches the model. More costs decoding time on every
+/// phrase and helps little.
+const BEFORE_CHARS: usize = 300;
 
 /// Where a model runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +70,9 @@ pub struct Device {
 pub struct Gguf {
     model: transcribe_cpp::Model,
     session: Session,
+    vocabulary: bool,
+    prompt: bool,
+    prefix: bool,
 }
 
 impl Gguf {
@@ -69,7 +98,13 @@ impl Gguf {
         let session = model
             .session()
             .map_err(|error| anyhow!("starting {}: {error}", id.name()))?;
-        let engine = Self { model, session };
+        let engine = Self {
+            vocabulary: model.supports(Feature::Vocabulary),
+            prompt: model.supports(Feature::ContextPrompt),
+            prefix: model.supports(Feature::TranscriptPrefix),
+            model,
+            session,
+        };
         log::info!(
             "engine: loaded {} ({}) on {} in {:.1?}",
             id.name(),
@@ -81,12 +116,56 @@ impl Gguf {
     }
 }
 
+impl Gguf {
+    /// The run options carrying as much of `context` as this model takes. The text before the
+    /// phrase goes in as a context prompt where the model has one, and otherwise as a transcript
+    /// to continue. `None` when nothing of the context applies.
+    fn options(&self, context: &Context) -> Option<RunOptions> {
+        let mut options = RunOptions::default();
+        if self.vocabulary {
+            options.vocabulary = context
+                .vocabulary
+                .iter()
+                .map(|term| term.trim())
+                .filter(|term| !term.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        let before = tail(&context.before, BEFORE_CHARS);
+        if !before.is_empty() {
+            match (self.prompt, self.prefix) {
+                (true, _) => options.prompt = Some(before.to_owned()),
+                (false, true) => options.prefix = Some(before.to_owned()),
+                (false, false) => {}
+            }
+        }
+        let used =
+            !options.vocabulary.is_empty() || options.prompt.is_some() || options.prefix.is_some();
+        used.then_some(options)
+    }
+}
+
 impl Engine for Gguf {
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
+    fn transcribe(&mut self, samples: &[f32], context: &Context) -> Result<String> {
+        let plain = RunOptions::default();
+        if let Some(options) = self.options(context) {
+            match self.session.run(samples, &options) {
+                Ok(transcript) => return Ok(transcript.text),
+                // The context is a help, so a model that rejects it still transcribes.
+                Err(error) => log::warn!("engine: transcribing without the context: {error}"),
+            }
+        }
         self.session
-            .run(samples, &RunOptions::default())
+            .run(samples, &plain)
             .map(|transcript| transcript.text)
             .map_err(|error| anyhow!("transcribing: {error}"))
+    }
+
+    fn abilities(&self) -> Abilities {
+        Abilities {
+            vocabulary: self.vocabulary,
+            before: self.prompt || self.prefix,
+        }
     }
 
     fn languages(&self) -> Vec<String> {
@@ -123,6 +202,7 @@ enum Job {
     Transcribe {
         model: ModelId,
         samples: Vec<f32>,
+        context: Context,
         reply: Reply,
     },
     /// Wakes the worker to take whatever draft sits in the shared slot.
@@ -140,7 +220,7 @@ enum Job {
 pub struct Transcriber {
     jobs: Sender<Job>,
     draft: Arc<Mutex<Option<Draft>>>,
-    device: Arc<Mutex<Option<Device>>>,
+    latest: Arc<Mutex<Option<Latest>>>,
 }
 
 /// A transcription whose result is only shown, never kept. Only the newest one waits, so drafts
@@ -148,6 +228,7 @@ pub struct Transcriber {
 struct Draft {
     model: ModelId,
     samples: Vec<f32>,
+    context: Context,
     reply: Reply,
 }
 
@@ -155,11 +236,11 @@ impl Transcriber {
     pub fn start(idle: Option<Duration>, processor: Processor) -> Result<Self> {
         let (jobs, receiver) = mpsc::channel();
         let draft = Arc::new(Mutex::new(None));
-        let device = Arc::new(Mutex::new(None));
+        let latest = Arc::new(Mutex::new(None));
         let worker = Worker {
             jobs: receiver,
             drafts: draft.clone(),
-            device: device.clone(),
+            latest: latest.clone(),
             idle,
             processor,
             loaded: HashMap::new(),
@@ -171,7 +252,7 @@ impl Transcriber {
         Ok(Self {
             jobs,
             draft,
-            device,
+            latest,
         })
     }
 
@@ -180,16 +261,19 @@ impl Transcriber {
         self.jobs.send(Job::Preload(model)).ok();
     }
 
-    /// Queues `samples` for transcription with `model`. `reply` runs on the worker thread.
+    /// Queues `samples` for transcription with `model`, told `context`. `reply` runs on the
+    /// worker thread.
     pub fn transcribe(
         &self,
         model: ModelId,
         samples: Vec<f32>,
+        context: Context,
         reply: impl FnOnce(Result<String>) + Send + 'static,
     ) {
         let job = Job::Transcribe {
             model,
             samples,
+            context,
             reply: Box::new(reply),
         };
         if let Err(mpsc::SendError(Job::Transcribe { reply, .. })) = self.jobs.send(job) {
@@ -204,11 +288,13 @@ impl Transcriber {
         &self,
         model: ModelId,
         samples: Vec<f32>,
+        context: Context,
         reply: impl FnOnce(Result<String>) + Send + 'static,
     ) {
         *self.draft.lock().expect("draft lock") = Some(Draft {
             model,
             samples,
+            context,
             reply: Box::new(reply),
         });
         self.jobs.send(Job::Draft).ok();
@@ -222,16 +308,29 @@ impl Transcriber {
         self.jobs.send(Job::Processor(processor)).ok();
     }
 
-    /// The device the most recently loaded model runs on, once one has loaded.
+    /// The device the most recently used model runs on, once one has loaded.
     pub fn device(&self) -> Option<Device> {
-        self.device.lock().expect("device lock").clone()
+        let latest = self.latest.lock().expect("latest lock");
+        latest.as_ref().map(|latest| latest.device.clone())
     }
+
+    /// What the most recently used model takes besides the audio, once one has loaded.
+    pub fn abilities(&self) -> Option<Abilities> {
+        let latest = self.latest.lock().expect("latest lock");
+        latest.as_ref().map(|latest| latest.abilities)
+    }
+}
+
+/// The model the worker used last, as the settings window describes it.
+struct Latest {
+    device: Device,
+    abilities: Abilities,
 }
 
 struct Worker {
     jobs: Receiver<Job>,
     drafts: Arc<Mutex<Option<Draft>>>,
-    device: Arc<Mutex<Option<Device>>>,
+    latest: Arc<Mutex<Option<Latest>>>,
     idle: Option<Duration>,
     processor: Processor,
     loaded: HashMap<ModelId, Gguf>,
@@ -267,12 +366,13 @@ impl Worker {
                 Job::Transcribe {
                     model,
                     samples,
+                    context,
                     reply,
                 } => {
                     let started = Instant::now();
                     let result = self
                         .engine(model)
-                        .and_then(|engine| engine.transcribe(&samples));
+                        .and_then(|engine| engine.transcribe(&samples, &context));
                     log::debug!(
                         "engine: {:.1} s of audio in {:.2?}",
                         samples.len() as f32 / 16_000.,
@@ -286,7 +386,7 @@ impl Worker {
                     };
                     let result = self
                         .engine(draft.model)
-                        .and_then(|engine| engine.transcribe(&draft.samples));
+                        .and_then(|engine| engine.transcribe(&draft.samples, &draft.context));
                     (draft.reply)(result);
                 }
                 Job::IdleLimit(limit) => self.idle = limit,
@@ -309,7 +409,10 @@ impl Worker {
                 entry.insert(engine)
             }
         };
-        *self.device.lock().expect("device lock") = Some(engine.device());
+        *self.latest.lock().expect("latest lock") = Some(Latest {
+            device: engine.device(),
+            abilities: engine.abilities(),
+        });
         Ok(engine)
     }
 }
@@ -318,4 +421,35 @@ impl Worker {
 /// stderr. Call once at startup, before any model loads.
 pub fn route_native_logs() {
     transcribe_cpp::init_logging();
+}
+
+/// The end of `text`, at most `limit` characters, starting at a word so the model never sees a
+/// cut-off one.
+fn tail(text: &str, limit: usize) -> &str {
+    let text = text.trim();
+    let count = text.chars().count();
+    if count <= limit {
+        return text;
+    }
+    let start = text
+        .char_indices()
+        .nth(count - limit)
+        .map_or(0, |(index, _)| index);
+    let rest = &text[start..];
+    match rest.find(char::is_whitespace) {
+        Some(space) => rest[space..].trim_start(),
+        None => rest,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tail_starts_at_a_word() {
+        assert_eq!(tail("  short  ", 300), "short");
+        assert_eq!(tail("one two three four", 9), "four");
+        assert_eq!(tail("один два три", 7), "три");
+    }
 }

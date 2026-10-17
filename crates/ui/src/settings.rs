@@ -168,6 +168,7 @@ pub struct Settings {
     hotkey: Entity<crate::hotkey::Recorder>,
     replace_from: Entity<Input>,
     replace_to: Entity<Input>,
+    term: Entity<Input>,
     /// The query last sent, so a notify that did not change the text does not search again.
     searched: String,
     /// The search result whose files are listed.
@@ -217,6 +218,7 @@ impl Settings {
             hotkey: cx.new(crate::hotkey::Recorder::new),
             replace_from: cx.new(|cx| Input::new("Heard as", cx)),
             replace_to: cx.new(|cx| Input::new("Write as", cx)),
+            term: cx.new(|cx| Input::new("Add a name or term", cx)),
             searched: String::new(),
             opened: None,
             page: Page::Model,
@@ -661,6 +663,93 @@ impl Settings {
         focus.focus(window, cx);
     }
 
+    /// The names and terms the model is asked to spell as written, and whether the model in use
+    /// takes them at all.
+    fn vocabulary(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let ignored = self
+            .status
+            .read(cx)
+            .abilities
+            .is_some_and(|abilities| !abilities.vocabulary);
+        let mut rows: Vec<AnyElement> = config
+            .vocabulary
+            .iter()
+            .enumerate()
+            .map(|(index, term)| {
+                let remove = Button::new(SharedString::from(format!("remove-term-{index}")))
+                    .icon("icons/x.svg")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| {
+                            if index < config.vocabulary.len() {
+                                config.vocabulary.remove(index);
+                            }
+                        });
+                    }));
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px(chrome::GROUP_PADDING)
+                    .py_2()
+                    .child(div().flex_1().min_w_0().child(term.clone()))
+                    .child(div().flex_none().child(remove))
+                    .into_any_element()
+            })
+            .collect();
+        let add = Button::new("add-term")
+            .label("Add")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, window, cx| this.add_term(window, cx)));
+        rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(chrome::GROUP_PADDING)
+                .py_3()
+                .child(div().flex_1().min_w_0().child(self.term.clone()))
+                .child(div().flex_none().child(add))
+                .into_any_element(),
+        );
+        if ignored {
+            let name = ModelId::parse(&config.model)
+                .map(|id| models::Described::of(id).name)
+                .unwrap_or_else(|| "This model".to_owned());
+            rows.push(
+                div()
+                    .px(chrome::GROUP_PADDING)
+                    .py_3()
+                    .text_size(theme.text(Text::Small))
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{name} does not use the vocabulary. Whisper and Qwen3-ASR do, and they also follow the text before each phrase."
+                    ))
+                    .into_any_element(),
+            );
+        }
+        group(Some("Vocabulary"), rows, cx)
+    }
+
+    /// Adds the term typed into the field and clears it.
+    fn add_term(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let term = self.term.read(cx).text().trim().to_owned();
+        if term.is_empty() {
+            return;
+        }
+        self.edit(cx, |config| {
+            if !config.vocabulary.contains(&term) {
+                config.vocabulary.push(term)
+            }
+        });
+        self.term.update(cx, |input, cx| input.set_text("", cx));
+        let focus = self.term.focus_handle(cx);
+        focus.focus(window, cx);
+    }
+
     /// The daemon's own memory and processor use, refreshed every second.
     fn resources(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -1038,7 +1127,10 @@ impl Settings {
     /// The groups of the current page.
     fn page(&self, config: &Config, cx: &mut Context<Self>) -> Vec<AnyElement> {
         match self.page {
-            Page::Model => vec![self.models(config, cx).into_any_element()],
+            Page::Model => vec![
+                self.models(config, cx).into_any_element(),
+                self.vocabulary(config, cx).into_any_element(),
+            ],
             Page::Find => vec![self.find(cx)],
             Page::Dictation => vec![
                 self.dictation(config, cx).into_any_element(),

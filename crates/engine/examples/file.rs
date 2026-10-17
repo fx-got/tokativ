@@ -1,14 +1,16 @@
 //! Runs a 16 kHz mono WAV file through the VAD, the segmenter and an engine, and prints each
-//! segment's text as a live session would insert it.
+//! segment's text as a live session would insert it. Each segment is told the text before it,
+//! and `TOKATIV_VOCABULARY` adds comma-separated terms. `TOKATIV_NO_CONTEXT` leaves both out, to
+//! compare.
 //!
-//! `cargo run -p tokativ-engine --example file -- <parakeet|gigaam> <file.wav>`
+//! `cargo run -p tokativ-engine --example file -- owner/repo/file.gguf <file.wav> [cpu|gpu]`
 
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use tokativ_audio::{Silero, Timing};
 use tokativ_config::Processor;
-use tokativ_engine::{Engine as _, Gguf, Joiner, ModelId};
+use tokativ_engine::{Context, Engine as _, Gguf, Joiner, ModelId};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -51,16 +53,37 @@ fn main() -> Result<()> {
     };
     let mut engine = Gguf::load(&model, processor)?;
     println!("running on {}", engine.device().name);
+    let abilities = engine.abilities();
+    println!(
+        "takes a vocabulary: {}, takes the text before: {}",
+        abilities.vocabulary, abilities.before
+    );
+    let plain = std::env::var_os("TOKATIV_NO_CONTEXT").is_some();
+    let vocabulary: Vec<String> = std::env::var("TOKATIV_VOCABULARY")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_owned)
+        .collect();
     let mut joiner = Joiner::new(None, true);
+    let mut written = String::new();
     for segment in segments {
         let started = Instant::now();
-        let text = engine.transcribe(&segment.samples)?;
+        let context = match plain {
+            true => Context::default(),
+            false => Context {
+                vocabulary: vocabulary.clone(),
+                before: written.clone(),
+            },
+        };
+        let text = engine.transcribe(&segment.samples, &context)?;
+        let joined = joiner.join(&text);
+        if let Some(joined) = &joined {
+            written.push_str(joined);
+        }
         let seconds = segment.samples.len() as f32 / 16_000.;
-        println!(
-            "[{seconds:.1} s in {:.2?}] {:?}",
-            started.elapsed(),
-            joiner.join(&text)
-        );
+        println!("[{seconds:.1} s in {:.2?}] {joined:?}", started.elapsed());
     }
     Ok(())
 }

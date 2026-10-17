@@ -111,6 +111,8 @@ pub struct Status {
     pub recording: bool,
     /// The device the loaded model runs on, once one has loaded.
     pub device: Option<tokativ_engine::Device>,
+    /// What the loaded model takes besides the audio, once one has loaded.
+    pub abilities: Option<tokativ_engine::Abilities>,
 }
 
 /// Where one model stands on disk.

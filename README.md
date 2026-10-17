@@ -21,8 +21,10 @@ focused app as you speak.
 > The project is vibe-coded as hell.
 
 Speech is recognized on your machine by [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp),
-on the graphics card through Vulkan, or Metal on macOS, or on the CPU. Nothing is downloaded until you pick a model:
-Parakeet is the recommended one, and settings can search Hugging Face for any other GGUF model.
+on the graphics card through Vulkan, or Metal on macOS, or on the CPU. Nothing is downloaded until
+you pick a model: Parakeet is the recommended one, and settings can search Hugging Face for any
+other GGUF model. Whisper and Qwen3-ASR also take a vocabulary of names and terms to spell as
+written, and follow the text before each phrase.
 
 ## Install
 

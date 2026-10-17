@@ -12,6 +12,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tokativ runs on macOS and Windows. It listens for a hotkey of its own there, Option+Space on
   macOS and Ctrl+Alt+Space on Windows, and types or pastes the text into the focused app. To
   change the hotkey, click it in settings and press the new one. Function keys work on their own.
+- A vocabulary on the Model page lists names and terms to spell as written. Whisper and Qwen3-ASR
+  also follow the text before each phrase, both what the field already held and what was said
+  before, so names stay spelled the same and phrases join up. Parakeet and GigaAM cannot take
+  either, and settings say so.
 - The flake builds Tokativ on Apple silicon Macs, and its Home Manager module runs it there as a
   launchd agent.
 

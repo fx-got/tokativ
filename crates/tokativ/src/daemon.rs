@@ -88,6 +88,31 @@ struct Session {
     restart: bool,
     /// Speech was heard, so confirming has something to wait for.
     heard: bool,
+    /// What the field held left of the cursor, read when the first segment went to the model.
+    /// The input method reports it only once the field has taken it, so it is read once.
+    surrounding: Option<String>,
+    /// The text this session has inserted so far.
+    written: String,
+}
+
+impl Session {
+    /// What the model is told with the next segment: the vocabulary, and the text that segment
+    /// follows. Segments still being transcribed are not in it yet.
+    fn context(
+        &mut self,
+        inserter: Option<&Inserter>,
+        vocabulary: &[String],
+    ) -> tokativ_engine::Context {
+        let surrounding = self.surrounding.get_or_insert_with(|| {
+            inserter
+                .and_then(Inserter::before_cursor)
+                .unwrap_or_default()
+        });
+        tokativ_engine::Context {
+            vocabulary: vocabulary.to_vec(),
+            before: format!("{surrounding}{}", self.written),
+        }
+    }
 }
 
 pub struct Daemon {
@@ -233,7 +258,10 @@ impl Daemon {
                 loop {
                     cx.background_executor().timer(DEVICE_POLL).await;
                     let alive = this.update(cx, |this, cx| {
-                        if this.status.read(cx).device != this.transcriber.device() {
+                        let status = this.status.read(cx);
+                        if status.device != this.transcriber.device()
+                            || status.abilities != this.transcriber.abilities()
+                        {
                             this.publish(cx);
                         }
                     });
@@ -392,6 +420,8 @@ impl Daemon {
             stopping: false,
             restart: false,
             heard: false,
+            surrounding: None,
+            written: String::new(),
         });
         self.publish(cx);
 
@@ -589,9 +619,11 @@ impl Daemon {
                     inserter.preedit(PLACEHOLDER.into());
                 }
                 let events = self.events.clone();
+                let context = session.context(self.inserter.as_ref(), &self.applied.vocabulary);
                 self.transcriber.transcribe(
                     session.engine.clone(),
                     segment.samples,
+                    context,
                     move |result| {
                         events
                             .unbounded_send(Event::Transcribed {
@@ -605,8 +637,9 @@ impl Daemon {
             tokativ_audio::Event::Progress(samples) => {
                 let segment = session.spoken;
                 let events = self.events.clone();
+                let context = session.context(self.inserter.as_ref(), &self.applied.vocabulary);
                 self.transcriber
-                    .draft(session.engine.clone(), samples, move |result| {
+                    .draft(session.engine.clone(), samples, context, move |result| {
                         events
                             .unbounded_send(Event::Drafted {
                                 session: id,
@@ -662,7 +695,10 @@ impl Daemon {
                 Joiner::new(inserter.before_cursor().as_deref(), capitalize)
             });
             match joiner.join(&restyle(&text, style)) {
-                Some(text) => inserter.insert(text, after),
+                Some(text) => {
+                    session.written.push_str(&text);
+                    inserter.insert(text, after)
+                }
                 None => inserter.preedit(after),
             }
         }
@@ -829,6 +865,7 @@ impl Daemon {
         let recording = self.session.is_some();
         let shown = self.shown(cx);
         let device = self.transcriber.device();
+        let abilities = self.transcriber.abilities();
         let (method, note) = match &self.inserter {
             Some(inserter) => {
                 let status = inserter.status();
@@ -845,6 +882,7 @@ impl Daemon {
                 note,
                 recording,
                 device,
+                abilities,
             };
             cx.notify();
         });

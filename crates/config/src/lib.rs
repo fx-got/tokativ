@@ -122,6 +122,9 @@ pub struct Config {
     #[serde(deserialize_with = "model_name")]
     pub model: String,
     pub processor: Processor,
+    /// Names, brands and jargon the model should spell as written here, most important first.
+    /// Only models that take a vocabulary use it, such as Whisper and Qwen3-ASR.
+    pub vocabulary: Vec<String>,
     pub vad: Vad,
     pub insertion: Insertion,
     pub pill: Pill,
@@ -147,6 +150,7 @@ impl Default for Config {
             input_device: None,
             model: DEFAULT_MODEL.to_owned(),
             processor: Processor::Auto,
+            vocabulary: Vec::new(),
             vad: Vad::default(),
             insertion: Insertion::default(),
             pill: Pill::default(),
