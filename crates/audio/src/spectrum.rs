@@ -32,17 +32,22 @@ const MIN_SPAN: f32 = 24.;
 const KNEE: f32 = 0.6;
 const ATTACK: f32 = 0.7;
 const DECAY: f32 = 0.12;
+/// The loudness reported for silence, in dBFS.
+const SILENT: f32 = -120.;
 
 /// The latest band levels in 0..1, written by the analyzer and read by the UI at any time.
 #[derive(Clone)]
 pub struct Levels {
     bands: Arc<[AtomicU32; BANDS]>,
+    /// The RMS level of the latest window in dBFS, unscaled, for a level meter.
+    loudness: Arc<AtomicU32>,
 }
 
 impl Default for Levels {
     fn default() -> Self {
         Self {
             bands: Arc::new(std::array::from_fn(|_| AtomicU32::new(0))),
+            loudness: Arc::new(AtomicU32::new(SILENT.to_bits())),
         }
     }
 }
@@ -52,15 +57,22 @@ impl Levels {
         std::array::from_fn(|index| f32::from_bits(self.bands[index].load(Ordering::Relaxed)))
     }
 
-    /// The loudest band, for a single level meter.
+    /// The loudest band.
     pub fn peak(&self) -> f32 {
         self.read().into_iter().fold(0., f32::max)
+    }
+
+    /// How loud the input is in dBFS, as a level meter shows it. Unlike the bands it is not
+    /// scaled to the room, so a quiet microphone reads quiet.
+    pub fn loudness(&self) -> f32 {
+        f32::from_bits(self.loudness.load(Ordering::Relaxed))
     }
 
     pub(crate) fn clear(&self) {
         for band in self.bands.iter() {
             band.store(0f32.to_bits(), Ordering::Relaxed);
         }
+        self.loudness.store(SILENT.to_bits(), Ordering::Relaxed);
     }
 
     fn set(&self, index: usize, value: f32) {
@@ -111,6 +123,14 @@ impl Analyzer {
     }
 
     fn analyze(&mut self) {
+        let window = &self.samples[..FFT_SIZE];
+        let rms =
+            (window.iter().map(|sample| sample * sample).sum::<f32>() / FFT_SIZE as f32).sqrt();
+        let loudness = (20. * rms.max(1e-6).log10()).max(SILENT);
+        self.levels
+            .loudness
+            .store(loudness.to_bits(), Ordering::Relaxed);
+
         for ((slot, sample), weight) in self.buffer.iter_mut().zip(&self.samples).zip(&self.window)
         {
             *slot = Complex32::new(sample * weight, 0.);
