@@ -10,8 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Tokativ runs on macOS and Windows. It listens for a hotkey of its own there, Option+Space on
-  macOS and Ctrl+Alt+Space on Windows, which settings can change, and types or pastes the text into
-  the focused app.
+  macOS and Ctrl+Alt+Space on Windows, and types or pastes the text into the focused app. To
+  change the hotkey, click it in settings and press the new one. Function keys work on their own.
 - The flake builds Tokativ on Apple silicon Macs, and its Home Manager module runs it there as a
   launchd agent.
 

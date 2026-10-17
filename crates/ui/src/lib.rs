@@ -6,7 +6,6 @@ mod chrome;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod desktop;
 mod host;
-#[cfg(not(target_os = "linux"))]
 mod hotkey;
 mod models;
 pub mod pill;

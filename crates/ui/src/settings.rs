@@ -164,6 +164,8 @@ pub struct Settings {
     usage: Usage,
     _sampling: Task<()>,
     search_input: Entity<Input>,
+    #[cfg(not(target_os = "linux"))]
+    hotkey: Entity<crate::hotkey::Recorder>,
     replace_from: Entity<Input>,
     replace_to: Entity<Input>,
     /// The query last sent, so a notify that did not change the text does not search again.
@@ -211,6 +213,8 @@ impl Settings {
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             usage: Usage::default(),
             search_input,
+            #[cfg(not(target_os = "linux"))]
+            hotkey: cx.new(crate::hotkey::Recorder::new),
             replace_from: cx.new(|cx| Input::new("Heard as", cx)),
             replace_to: cx.new(|cx| Input::new("Write as", cx)),
             searched: String::new(),
@@ -299,28 +303,14 @@ impl Settings {
             );
         }
         #[cfg(not(target_os = "linux"))]
-        rows.insert(0, self.hotkey(config, cx));
+        rows.insert(0, self.hotkey(cx));
         group(None, rows, cx)
     }
 
-    /// The hotkey that starts and confirms a session, picked from a few that rarely clash. One
-    /// typed into the config file by hand shows as the current choice.
+    /// The hotkey that starts and confirms a session, recorded by pressing it.
     #[cfg(not(target_os = "linux"))]
-    fn hotkey(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
-        let current = config.hotkey.clone();
-        let picker = Picker::new("hotkey", &self.popovers, crate::hotkey::label(&current))
-            .width(Picker::REGULAR)
-            .items(crate::hotkey::PRESETS.iter().map(|preset| {
-                MenuItem::new(
-                    SharedString::from(format!("hotkey-{preset}")),
-                    crate::hotkey::label(preset),
-                )
-                .selected(*preset == current)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.hotkey = (*preset).to_owned());
-                }))
-            }));
-        setting("Hotkey", picker.into_any_element(), cx).into_any_element()
+    fn hotkey(&self, cx: &mut Context<Self>) -> AnyElement {
+        setting("Hotkey", self.hotkey.clone().into_any_element(), cx).into_any_element()
     }
 
     fn detection(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {

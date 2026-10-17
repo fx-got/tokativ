@@ -62,9 +62,10 @@ On Linux, bind `tokativ toggle` to a key in your compositor. It needs one with l
 Hyprland, Sway, river or KDE Plasma, not GNOME.
 
 On macOS and Windows, Tokativ listens for the hotkey itself: Option+Space on macOS, Ctrl+Alt+Space
-on Windows, and settings can change it. macOS asks for Accessibility access the first time Tokativ
-types, and the text only arrives once it is allowed. Neither system lets another app put a draft at
-the cursor, so the text appears once each phrase is done.
+on Windows. To change it, click the hotkey in settings and press the new one. A function key such
+as F5 works on its own, any other key needs a modifier. macOS asks for Accessibility access the
+first time Tokativ types, and the text only arrives once it is allowed. Neither system lets another
+app put a draft at the cursor, so the text appears once each phrase is done.
 
 ## License
 

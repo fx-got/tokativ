@@ -320,6 +320,15 @@ impl Daemon {
             Action::Cancel => self.cancel(cx),
             Action::Settings => self.open_settings(cx),
             Action::Quit => self.quit(cx),
+            #[cfg(not(target_os = "linux"))]
+            Action::Capturing(capturing) => {
+                if let Some(hotkeys) = &mut self.hotkeys {
+                    hotkeys.pause(capturing);
+                }
+            }
+            // The compositor owns the hotkey on Linux, and no window records one there.
+            #[cfg(target_os = "linux")]
+            Action::Capturing(_) => {}
         }
     }
 

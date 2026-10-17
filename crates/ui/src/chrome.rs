@@ -252,6 +252,7 @@ pub fn meter(fraction: f32, height: Pixels, cx: &App) -> impl IntoElement {
 }
 
 /// A box of monospaced text, such as a config snippet to copy, shaped like the cards around it.
+#[cfg(target_os = "linux")]
 pub fn code(text: &str, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()

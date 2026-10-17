@@ -25,6 +25,8 @@ pub struct Hotkeys {
     escape: HotKey,
     enter: HotKey,
     held: bool,
+    /// The toggle is let go while a window records a new one.
+    paused: bool,
 }
 
 impl Hotkeys {
@@ -58,6 +60,7 @@ impl Hotkeys {
             escape,
             enter,
             held: false,
+            paused: false,
         };
         if let Err(error) = hotkeys.set_toggle(toggle) {
             log::error!("hotkey: {error:#}");
@@ -74,10 +77,13 @@ impl Hotkeys {
         if self.toggle == Some(hotkey) {
             return Ok(());
         }
-        self.manager
-            .register(hotkey)
-            .with_context(|| format!("registering {text}"))?;
+        if !self.paused {
+            self.manager
+                .register(hotkey)
+                .with_context(|| format!("registering {text}"))?;
+        }
         if let Some(old) = self.toggle.replace(hotkey)
+            && !self.paused
             && let Err(error) = self.manager.unregister(old)
         {
             log::warn!("hotkey: cannot release {old}: {error}");
@@ -85,6 +91,25 @@ impl Hotkeys {
         self.toggle_id.store(hotkey.id(), Ordering::Relaxed);
         log::info!("hotkey: {text} toggles dictation");
         Ok(())
+    }
+
+    /// Lets go of the toggle while `paused`, so a window recording a new hotkey sees the keys of
+    /// the current one, and takes it back after. A toggle set meanwhile is registered then.
+    pub fn pause(&mut self, paused: bool) {
+        if self.paused == paused {
+            return;
+        }
+        self.paused = paused;
+        let Some(toggle) = self.toggle else {
+            return;
+        };
+        let changed = match paused {
+            true => self.manager.unregister(toggle),
+            false => self.manager.register(toggle),
+        };
+        if let Err(error) = changed {
+            log::warn!("hotkey: cannot change {toggle}: {error}");
+        }
     }
 
     /// Takes Escape and Enter from every app while `held`, and gives them back when not.
@@ -107,7 +132,9 @@ impl Hotkeys {
 impl Drop for Hotkeys {
     fn drop(&mut self) {
         self.hold_session_keys(false);
-        if let Some(toggle) = self.toggle.take() {
+        if let Some(toggle) = self.toggle.take()
+            && !self.paused
+        {
             self.manager.unregister(toggle).ok();
         }
     }

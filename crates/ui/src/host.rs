@@ -20,6 +20,8 @@ pub enum Action {
     Cancel,
     Settings,
     Quit,
+    /// A window is recording a new hotkey, so the current one has to let its presses through.
+    Capturing(bool),
 }
 
 type Dispatch = Rc<dyn Fn(Action, &mut App)>;

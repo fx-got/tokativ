@@ -138,6 +138,8 @@ pub struct Setup {
     /// Counts moves between steps.
     moves: u32,
     desktop: Desktop,
+    #[cfg(not(target_os = "linux"))]
+    recorder: Entity<crate::hotkey::Recorder>,
     /// The binding found in the desktop's config, looked for again while the hotkey step shows.
     bound: Option<Bound>,
     /// A session started while the hotkey step showed, so the key is known to work.
@@ -184,6 +186,8 @@ impl Setup {
             from: None,
             moves: 0,
             desktop: Desktop::detect(),
+            #[cfg(not(target_os = "linux"))]
+            recorder: cx.new(crate::hotkey::Recorder::new),
             bound: None,
             pressed: false,
             _watching: None,
@@ -521,10 +525,18 @@ impl Setup {
             .flex_col()
             .gap_3()
             .child(check(icon, status, ready, cx))
-            .child(chrome::code(&hotkey, cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .child("Hotkey")
+                    .child(self.recorder.clone()),
+            )
             .child(intro(
                 format!(
-                    "Tokativ listens for this key in every app. Settings can change it, under Dictation.{permission}"
+                    "Tokativ listens for this key in every app. Click it to record another.{permission}"
                 ),
                 cx,
             ))
