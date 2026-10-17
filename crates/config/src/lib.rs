@@ -284,6 +284,8 @@ pub struct Style {
     pub final_period: bool,
     /// Write hyphenated laughter as one word, "ха-ха-ха" as "хахаха".
     pub join_laughter: bool,
+    /// Replace explicit spoken emoji names, such as "thumbs up emoji", with the symbol.
+    pub spoken_emoji: bool,
     pub replacements: Vec<Replacement>,
 }
 
@@ -293,6 +295,7 @@ impl Default for Style {
             capitals: Capitals::AsSpoken,
             final_period: true,
             join_laughter: false,
+            spoken_emoji: true,
             replacements: Vec::new(),
         }
     }
@@ -425,5 +428,14 @@ mod tests {
         assert!(config.model.starts_with("handy-computer/gigaam"));
         assert_eq!(config.vad.silence_ms, 700);
         assert_eq!(config.vad.max_segment_s, 20);
+        assert!(config.style.spoken_emoji);
+    }
+
+    #[test]
+    fn spoken_emoji_defaults_on_in_existing_styles_and_can_be_disabled() {
+        let config: Config = toml::from_str("[style]\nfinal_period = false\n").unwrap();
+        assert!(config.style.spoken_emoji);
+        let config: Config = toml::from_str("[style]\nspoken_emoji = false\n").unwrap();
+        assert!(!config.style.spoken_emoji);
     }
 }

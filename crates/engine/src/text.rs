@@ -29,6 +29,9 @@ pub fn restyle(text: &str, style: &Style) -> String {
                 .into_owned();
         }
     }
+    if style.spoken_emoji {
+        text = crate::emoji::replace(&text);
+    }
     if style.join_laughter {
         text = LAUGHTER
             .replace_all(&text, |found: &regex::Captures| found[0].replace('-', ""))
@@ -146,6 +149,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spoken_emoji_is_on_by_default_and_can_be_disabled() {
+        assert_eq!(
+            restyle("Nice, thumbs up emoji.", &Style::default()),
+            "Nice, 👍."
+        );
+        let literal = Style {
+            spoken_emoji: false,
+            ..Style::default()
+        };
+        assert_eq!(restyle("thumbs up emoji", &literal), "thumbs up emoji");
+        let custom = Style {
+            replacements: vec![tokativ_config::Replacement {
+                from: "my approval".into(),
+                to: "thumbs up emoji".into(),
+            }],
+            final_period: false,
+            ..Style::default()
+        };
+        assert_eq!(restyle("my approval.", &custom), "👍");
+    }
+
+    #[test]
     fn segments_join_into_sentences() {
         let mut joiner = Joiner::new(None, true);
         assert_eq!(
@@ -177,6 +202,7 @@ mod tests {
             capitals: Capitals::LowerStarts,
             final_period: false,
             join_laughter: true,
+            spoken_emoji: true,
             replacements: vec![tokativ_config::Replacement {
                 from: "токатив".into(),
                 to: "Tokativ".into(),

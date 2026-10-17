@@ -73,6 +73,12 @@ On every platform, **Settings → Pill → Live caption** adds a larger floating
 current draft and the latest dictated text. It sits below a top pill or above a bottom pill,
 and lets clicks through to the app underneath. It is on by default on macOS and Windows.
 
+**Settings → Writing style → Spoken emoji** replaces names such as “thumbs up emoji” with 👍
+and “эмодзи красное сердце” with ❤️. It is on by default, works offline, and recognizes the full
+Unicode 17 emoji catalogue with names in 140+ languages, including flags and skin tones.
+Say “emoji” or its local equivalent (such as “эмодзи”, “絵文字” or “이모지”) before or after the name.
+Names without an emoji command remain ordinary text.
+
 ## License
 
 GPL-3.0-or-later.

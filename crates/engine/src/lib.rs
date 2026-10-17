@@ -1,6 +1,7 @@
 //! Speech-to-text and the worker thread that runs it. Models are GGUF files run by
 //! transcribe.cpp, on the graphics card through Vulkan when there is one.
 
+mod emoji;
 pub mod models;
 mod text;
 

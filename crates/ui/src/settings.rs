@@ -574,8 +574,20 @@ impl Settings {
             }));
         let period = style.final_period;
         let laughter = style.join_laughter;
+        let spoken_emoji = style.spoken_emoji;
         let mut rows = vec![
             setting("Capitals", capitals_picker.into_any_element(), cx).into_any_element(),
+            row(
+                "Spoken emoji",
+                "“Thumbs up emoji” → 👍. Names in 140+ languages.",
+                Switch::new("spoken-emoji", spoken_emoji)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| config.style.spoken_emoji = !spoken_emoji);
+                    }))
+                    .into_any_element(),
+                cx,
+            )
+            .into_any_element(),
             setting(
                 "Period at the end",
                 Switch::new("final-period", period)
