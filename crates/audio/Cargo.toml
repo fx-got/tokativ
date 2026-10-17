@@ -11,7 +11,12 @@ log.workspace = true
 rtrb.workspace = true
 rubato.workspace = true
 rustfft.workspace = true
-transcribe-cpp.workspace = true
 dirs.workspace = true
 tokativ-config.workspace = true
 hound.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+transcribe-cpp = { workspace = true, features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+transcribe-cpp = { workspace = true, features = ["vulkan"] }

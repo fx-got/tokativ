@@ -1,13 +1,15 @@
-//! The control socket at `$XDG_RUNTIME_DIR/tokativ.sock`. Each connection carries one command as
-//! a line of text and gets one line back, `ok` or `error: <reason>`.
+//! The control socket at `$XDG_RUNTIME_DIR/tokativ.sock`, or a named pipe on Windows. Each
+//! connection carries one command as a line of text and gets one line back, `ok` or
+//! `error: <reason>`.
 
-use std::io::{BufRead as _, BufReader, ErrorKind, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
+use std::thread;
 use std::time::Duration;
-use std::{fs, thread};
 
 use anyhow::{Context as _, Result, bail};
+#[cfg(windows)]
+use interprocess::local_socket::traits::ListenerExt as _;
 
 /// What a client can ask the daemon to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,20 +66,13 @@ impl Command {
 /// Fails when another daemon already answers on the socket. A socket file left by a daemon that
 /// died is removed and rebound.
 pub fn serve(path: &Path, deliver: impl Fn(Command) + Send + 'static) -> Result<()> {
-    if UnixStream::connect(path).is_ok() {
+    if transport::connect(path).is_ok() {
         bail!(
             "another tokativ daemon is already listening on {}",
             path.display()
         );
     }
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != ErrorKind::NotFound => {
-            return Err(error).with_context(|| format!("removing stale {}", path.display()));
-        }
-        _ => {}
-    }
-    let listener =
-        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
+    let listener = transport::listen(path)?;
     thread::Builder::new()
         .name("ipc".into())
         .spawn(move || {
@@ -96,8 +91,8 @@ pub fn serve(path: &Path, deliver: impl Fn(Command) + Send + 'static) -> Result<
     Ok(())
 }
 
-fn answer(stream: UnixStream, deliver: &impl Fn(Command)) -> Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+fn answer(stream: transport::Stream, deliver: &impl Fn(Command)) -> Result<()> {
+    transport::time_out(&stream, Duration::from_secs(2))?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
     let reply = match Command::parse(line.trim()) {
@@ -112,14 +107,87 @@ fn answer(stream: UnixStream, deliver: &impl Fn(Command)) -> Result<()> {
 }
 
 /// Sends one command to a running daemon and returns its reply. Errors with
-/// [`ErrorKind::NotFound`] or [`ErrorKind::ConnectionRefused`] inside when no daemon listens.
+/// [`std::io::ErrorKind::NotFound`] or [`std::io::ErrorKind::ConnectionRefused`] when no daemon
+/// listens.
 pub fn send(path: &Path, command: &Command) -> std::io::Result<String> {
-    let stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let stream = transport::connect(path)?;
+    transport::time_out(&stream, Duration::from_secs(5))?;
     writeln!(&stream, "{}", command.line())?;
     let mut reply = String::new();
     BufReader::new(&stream).read_line(&mut reply)?;
     Ok(reply.trim().to_string())
+}
+
+/// A Unix socket at the path.
+#[cfg(unix)]
+mod transport {
+    use std::io::ErrorKind;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::Path;
+    use std::time::Duration;
+
+    use anyhow::{Context as _, Result};
+
+    pub type Stream = UnixStream;
+
+    pub fn listen(path: &Path) -> Result<UnixListener> {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != ErrorKind::NotFound => {
+                return Err(error).with_context(|| format!("removing stale {}", path.display()));
+            }
+            _ => {}
+        }
+        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))
+    }
+
+    pub fn connect(path: &Path) -> std::io::Result<Stream> {
+        UnixStream::connect(path)
+    }
+
+    pub fn time_out(stream: &Stream, after: Duration) -> std::io::Result<()> {
+        stream.set_read_timeout(Some(after))
+    }
+}
+
+/// A named pipe, since Windows has no Unix sockets in std. The pipe is named after the socket
+/// path, so a sandbox gets a pipe of its own.
+#[cfg(windows)]
+mod transport {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use anyhow::{Context as _, Result};
+    use interprocess::local_socket::prelude::*;
+    use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, Name};
+
+    pub type Stream = interprocess::local_socket::Stream;
+
+    pub fn listen(path: &Path) -> Result<Listener> {
+        ListenerOptions::new()
+            .name(name(path)?)
+            .create_sync()
+            .with_context(|| format!("creating the pipe for {}", path.display()))
+    }
+
+    pub fn connect(path: &Path) -> std::io::Result<Stream> {
+        Stream::connect(name(path)?)
+    }
+
+    pub fn time_out(stream: &Stream, after: Duration) -> std::io::Result<()> {
+        stream.set_recv_timeout(Some(after))
+    }
+
+    /// `tokativ-` and a hash of the path, which keeps the name short and free of separators.
+    fn name(path: &Path) -> std::io::Result<Name<'static>> {
+        let hash = path
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        format!("tokativ-{hash:016x}").to_ns_name::<GenericNamespaced>()
+    }
 }
 
 #[cfg(test)]

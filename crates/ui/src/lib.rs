@@ -2,8 +2,12 @@
 //! with Sonora's `ui` crate.
 
 mod chrome;
+// Off Linux there is no compositor to give binding directions for, so most of this goes unused.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod desktop;
 mod host;
+#[cfg(not(target_os = "linux"))]
+mod hotkey;
 mod models;
 pub mod pill;
 mod radius;

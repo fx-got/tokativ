@@ -4,7 +4,7 @@
 use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, App, ClipboardItem, Context, Entity, Global, ScrollHandle,
+    Animation, AnimationExt as _, App, Context, Entity, Global, ScrollHandle,
     SharedString, Size, Task, Window, WindowHandle, div, px, relative, svg,
 };
 use std::time::Instant;
@@ -16,7 +16,7 @@ use ui::{
 };
 
 use crate::chrome::{self, meter};
-use crate::desktop::{self, Bound, Desktop};
+use crate::desktop::{Bound, Desktop};
 use crate::host::{Action, Host, Library, Status, Store};
 use crate::models;
 use crate::settings::device_menu;
@@ -42,6 +42,9 @@ impl Global for Open {}
 
 /// Opens the setup window, or raises it when it is already open.
 pub fn open(cx: &mut App) {
+    // An accessory app on macOS stays behind the app in front unless it asks to come forward.
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
     if let Some(handle) = cx.try_global::<Open>().map(|open| open.0)
         && handle
             .update(cx, |_, window, _| window.activate_window())
@@ -418,8 +421,8 @@ impl Setup {
 
     /// Directions for binding the toggle, written for the desktop this session runs in. The step
     /// watches the config for a binding and confirms once the key actually starts a session.
+    #[cfg(target_os = "linux")]
     fn hotkey(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let desktop = self.desktop;
         let snippet = desktop.snippet();
         let (icon, status, ready) = match (&self.bound, self.pressed) {
@@ -447,29 +450,7 @@ impl Setup {
                 false,
             ),
         };
-        let status = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px(chrome::GROUP_PADDING)
-            .py_3()
-            .rounded(chrome::GROUP_RADIUS)
-            .border_1()
-            .border_color(match ready {
-                true => theme.foreground.opacity(0.5),
-                false => theme.border.opacity(0.6),
-            })
-            .child(
-                svg()
-                    .path(icons::path(icon))
-                    .size(px(16.))
-                    .flex_none()
-                    .text_color(match ready {
-                        true => theme.foreground,
-                        false => theme.muted_foreground,
-                    }),
-            )
-            .child(div().text_size(theme.text(Text::Small)).child(status));
+        let status = check(icon, status, ready, cx);
 
         let config = desktop.config_file();
         let actions = div()
@@ -482,7 +463,7 @@ impl Setup {
                     .small()
                     .outline()
                     .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(snippet.to_owned()))
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(snippet.to_owned()))
                     }),
             )
             .when_some(config, |this, config| {
@@ -492,7 +473,7 @@ impl Setup {
                         .icon("icons/external-link.svg")
                         .small()
                         .outline()
-                        .on_click(move |_, _, _| desktop::open(&config)),
+                        .on_click(move |_, _, _| crate::desktop::open(&config)),
                 )
             });
 
@@ -512,6 +493,43 @@ impl Setup {
             })
     }
 
+    /// The hotkey Tokativ registers itself on macOS and Windows. The step confirms once the key
+    /// starts a session.
+    #[cfg(not(target_os = "linux"))]
+    fn hotkey(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let hotkey = crate::hotkey::label(&self.store.read(cx).config().hotkey);
+        let (icon, status, ready) = match self.pressed {
+            true => (
+                "icons/circle-check.svg",
+                "The key works. Press it once more to close the pill.".to_string(),
+                true,
+            ),
+            false => (
+                "icons/info.svg",
+                format!("Press {hotkey} to check it."),
+                false,
+            ),
+        };
+        let permission = match cfg!(target_os = "macos") {
+            true => {
+                " macOS asks for Accessibility access the first time Tokativ types, and the text only arrives once it is allowed."
+            }
+            false => "",
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(check(icon, status, ready, cx))
+            .child(chrome::code(&hotkey, cx))
+            .child(intro(
+                format!(
+                    "Tokativ listens for this key in every app. Settings can change it, under Dictation.{permission}"
+                ),
+                cx,
+            ))
+    }
+
     fn can_advance(&self, cx: &App) -> bool {
         match self.step {
             Step::Models => ModelId::parse(&self.store.read(cx).config().model)
@@ -529,11 +547,40 @@ impl Setup {
     }
 }
 
-fn intro(text: &'static str, cx: &App) -> impl IntoElement {
+fn intro(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
     div()
         .text_color(cx.theme().muted_foreground)
         .text_size(cx.theme().text(Text::Small))
-        .child(text)
+        .child(text.into())
+}
+
+/// A line in a rounded frame saying where the hotkey check stands. The frame and icon brighten
+/// once the key has been seen to work.
+fn check(icon: &str, status: String, ready: bool, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(chrome::GROUP_PADDING)
+        .py_3()
+        .rounded(chrome::GROUP_RADIUS)
+        .border_1()
+        .border_color(match ready {
+            true => theme.foreground.opacity(0.5),
+            false => theme.border.opacity(0.6),
+        })
+        .child(
+            svg()
+                .path(icons::path(icon))
+                .size(px(16.))
+                .flex_none()
+                .text_color(match ready {
+                    true => theme.foreground,
+                    false => theme.muted_foreground,
+                }),
+        )
+        .child(div().text_size(theme.text(Text::Small)).child(status))
 }
 
 /// The step header: the step's icon, name and number, and a bar of one segment per step. Moving

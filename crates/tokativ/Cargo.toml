@@ -13,7 +13,6 @@ futures.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 icons.workspace = true
-ksni.workspace = true
 log.workspace = true
 notify.workspace = true
 tokativ-audio.workspace = true
@@ -22,3 +21,19 @@ tokativ-engine.workspace = true
 tokativ-input.workspace = true
 tokativ-ui.workspace = true
 ui.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+global-hotkey.workspace = true
+tray-icon.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+interprocess.workspace = true
+winreg.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_System_Threading"] }

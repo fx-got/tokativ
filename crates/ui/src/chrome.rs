@@ -7,7 +7,15 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, px,
 };
 use tokativ_config::APP_ID;
-use ui::{ActiveTheme as _, Text, WindowControls, WindowFrame};
+#[cfg(target_os = "linux")]
+use ui::WindowFrame;
+use ui::{ActiveTheme as _, Text, WindowControls};
+
+/// Room the title leaves on its left. macOS draws its window buttons over the title bar there.
+const TITLE_INSET: Pixels = match cfg!(target_os = "macos") {
+    true => px(78.),
+    false => px(16.),
+};
 
 /// The options for a normal toplevel of `size` with client-side decorations.
 pub fn options(title: &str, size: Size<Pixels>, cx: &App) -> WindowOptions {
@@ -55,7 +63,7 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
         .justify_between()
         .w_full()
         .h(height)
-        .pl_4()
+        .pl(TITLE_INSET)
         .bg(theme.background)
         .border_b_1()
         .border_color(theme.title_bar_border)
@@ -77,7 +85,7 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
             this.child(div().flex_none().pr_2().child(WindowControls::new(false)))
         });
 
-    div()
+    let frame = div()
         .size_full()
         .flex()
         .flex_col()
@@ -114,9 +122,12 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
         })
         .on_mouse_move(|event, window, cx| ui::update_middle_scroll(event.position, window, cx))
         .child(title_bar)
-        .child(div().flex_1().min_h_0().child(content))
-        .child(WindowFrame::new())
-        .into_any_element()
+        .child(div().flex_1().min_h_0().child(content));
+    // The resize edges and shadow of a client-decorated window on Wayland. macOS and Windows
+    // draw their own.
+    #[cfg(target_os = "linux")]
+    let frame = frame.child(WindowFrame::new());
+    frame.into_any_element()
 }
 
 /// A section label in Sonora's settings style.

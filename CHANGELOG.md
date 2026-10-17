@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Tokativ runs on macOS and Windows. It listens for a hotkey of its own there, Option+Space on
+  macOS and Ctrl+Alt+Space on Windows, which settings can change, and types or pastes the text into
+  the focused app.
+
+### Changed
+
+- Settings leave out the descriptions that only repeated a setting's name, and search results
+  show how often a model was downloaded instead of its likes.
+
 ## [0.2.0] - 2026-10-17
 
 ### Changed

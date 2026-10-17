@@ -45,6 +45,9 @@ impl Global for Open {}
 
 /// Opens the settings window, or raises it when it is already open.
 pub fn open(cx: &mut App) {
+    // An accessory app on macOS stays behind the app in front unless it asks to come forward.
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
     if let Some(handle) = cx.try_global::<Open>().map(|open| open.0)
         && handle
             .update(cx, |_, window, _| window.activate_window())
@@ -272,15 +275,20 @@ impl Settings {
             .item(default_item)
             .items(device_items.collect::<Vec<_>>());
 
-        let live = config.live_preview;
-        let live_switch = Switch::new("live-preview", live)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.edit(cx, |config| config.live_preview = !live);
-            }))
-            .into_any_element();
-        group(
-            None,
-            vec![
+        let mut rows =
+            vec![setting("Microphone", device_picker.into_any_element(), cx).into_any_element()];
+        // Drafts at the cursor need the Wayland input method. Elsewhere Tokativ registers the
+        // hotkey itself, so that is the setting in its place.
+        #[cfg(target_os = "linux")]
+        {
+            let live = config.live_preview;
+            let live_switch = Switch::new("live-preview", live)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| config.live_preview = !live);
+                }))
+                .into_any_element();
+            rows.insert(
+                0,
                 row(
                     "Live text",
                     "A draft at the cursor while you speak. Needs the input method.",
@@ -288,10 +296,31 @@ impl Settings {
                     cx,
                 )
                 .into_any_element(),
-                setting("Microphone", device_picker.into_any_element(), cx).into_any_element(),
-            ],
-            cx,
-        )
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        rows.insert(0, self.hotkey(config, cx));
+        group(None, rows, cx)
+    }
+
+    /// The hotkey that starts and confirms a session, picked from a few that rarely clash. One
+    /// typed into the config file by hand shows as the current choice.
+    #[cfg(not(target_os = "linux"))]
+    fn hotkey(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let current = config.hotkey.clone();
+        let picker = Picker::new("hotkey", &self.popovers, crate::hotkey::label(&current))
+            .width(Picker::REGULAR)
+            .items(crate::hotkey::PRESETS.iter().map(|preset| {
+                MenuItem::new(
+                    SharedString::from(format!("hotkey-{preset}")),
+                    crate::hotkey::label(preset),
+                )
+                .selected(*preset == current)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| config.hotkey = (*preset).to_owned());
+                }))
+            }));
+        setting("Hotkey", picker.into_any_element(), cx).into_any_element()
     }
 
     fn detection(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
@@ -398,16 +427,24 @@ impl Settings {
         let backend = config.insertion.backend;
         let picker = Picker::new("backend", &self.popovers, backend.name())
             .width(Picker::REGULAR)
-            .items(Backend::ALL.into_iter().map(|choice| {
-                MenuItem::new(
-                    SharedString::from(format!("backend-{choice:?}")),
-                    choice.name(),
-                )
-                .selected(choice == backend)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.insertion.backend = choice);
-                }))
-            }));
+            .items(
+                Backend::ALL
+                    .into_iter()
+                    .filter(|choice| {
+                        // The input method is a Wayland protocol.
+                        cfg!(target_os = "linux") || *choice != Backend::InputMethod
+                    })
+                    .map(|choice| {
+                        MenuItem::new(
+                            SharedString::from(format!("backend-{choice:?}")),
+                            choice.name(),
+                        )
+                        .selected(choice == backend)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.insertion.backend = choice);
+                        }))
+                    }),
+            );
         group(
             None,
             vec![match note {

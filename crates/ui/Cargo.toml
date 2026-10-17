@@ -11,8 +11,18 @@ futures.workspace = true
 gpui.workspace = true
 icons.workspace = true
 log.workspace = true
-rustix = { workspace = true, features = ["param"] }
 tokativ-audio.workspace = true
 tokativ-config.workspace = true
 ui.workspace = true
 tokativ-engine.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["param"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpu-time.workspace = true
+memory-stats.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

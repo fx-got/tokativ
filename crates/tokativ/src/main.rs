@@ -1,14 +1,19 @@
-//! Tokativ: local dictation for Wayland. Run without arguments, or with `daemon`, it starts the
-//! background process. Every other subcommand is sent to that process over its socket.
+//! Tokativ: local dictation. Run without arguments, or with `daemon`, it starts the background
+//! process. Every other subcommand is sent to that process over its socket.
+
+// A console window would sit open beside the daemon on Windows. Commands typed in a terminal
+// attach to that terminal's console instead, in `main`.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod assets;
 mod autostart;
 mod daemon;
+#[cfg(not(target_os = "linux"))]
+mod hotkey;
 mod ipc;
 mod tray;
 
 use std::io::ErrorKind;
-use std::os::unix::process::CommandExt as _;
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
@@ -22,7 +27,7 @@ use crate::ipc::Command;
 const STARTUP: Duration = Duration::from_secs(10);
 
 #[derive(Parser)]
-#[command(name = "tokativ", version, about = "Local dictation for Wayland")]
+#[command(name = "tokativ", version, about = "Local dictation")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Verb>,
@@ -66,6 +71,8 @@ enum Verb {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    attach_console();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
         "info,i18n=off,naga=warn,wgpu=warn,wgpu_hal=error,zbus=warn,tracing=warn,transcribe_cpp=warn,pulseaudio=off",
     ))
@@ -159,7 +166,7 @@ fn link_models(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
         for file in files.flatten() {
             let link = target.join(file.file_name());
             if !link.exists() {
-                std::os::unix::fs::symlink(file.path(), &link)
+                link_file(&file.path(), &link)
                     .with_context(|| format!("linking {}", link.display()))?;
             }
         }
@@ -207,13 +214,13 @@ fn absent(error: &std::io::Error) -> bool {
     )
 }
 
-/// Starts the daemon through its systemd user service when there is one, so it runs where the
-/// service manager can watch it. Otherwise starts it directly in its own process group, so it
-/// outlives the compositor's spawn.
+/// On Linux, starts the daemon through its systemd user service when there is one, so it runs
+/// where the service manager can watch it. Otherwise starts it directly in its own process
+/// group, so it outlives whatever ran the command.
 fn spawn_daemon() -> Result<()> {
     // A sandboxed command starts a sandboxed daemon, never the installed service.
     let sandboxed = tokativ_config::sandbox().is_some();
-    if !sandboxed {
+    if cfg!(target_os = "linux") && !sandboxed {
         let service = std::process::Command::new("systemctl")
             .args(["--user", "start", "tokativ.service"])
             .stdin(Stdio::null())
@@ -225,13 +232,49 @@ fn spawn_daemon() -> Result<()> {
         }
     }
     let exe = std::env::current_exe().context("finding the running binary")?;
-    std::process::Command::new(exe)
+    let mut daemon = std::process::Command::new(exe);
+    daemon
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .process_group(0)
-        .spawn()
-        .context("starting the daemon")?;
+        .stderr(Stdio::inherit());
+    detach(&mut daemon);
+    daemon.spawn().context("starting the daemon")?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(unix)]
+fn link_file(file: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(file, link)
+}
+
+/// A hard link, since symbolic links need developer mode or an administrator on Windows. Both
+/// sit in the same user folder, so they share a volume.
+#[cfg(windows)]
+fn link_file(file: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::fs::hard_link(file, link)
+}
+
+/// Writes to the console of the terminal the command was typed in, if there is one. Without it
+/// a GUI-subsystem binary prints nothing.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: only asks Windows to connect this process to its parent's console.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
 }

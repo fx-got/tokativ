@@ -16,6 +16,8 @@ use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
 
 use crate::assets::Assets;
 use crate::autostart;
+#[cfg(not(target_os = "linux"))]
+use crate::hotkey::{Hotkeys, Pressed};
 use crate::ipc::{self, Command};
 use crate::tray::{Shown, Tray, TrayEvent};
 
@@ -103,6 +105,10 @@ pub struct Daemon {
     pill: Option<Placed>,
     tray: Option<Tray>,
     tray_events: UnboundedSender<TrayEvent>,
+    /// The toggle hotkey and, during a session, Escape and Enter. Linux leaves the toggle to the
+    /// compositor and takes Escape and Enter through the input method instead.
+    #[cfg(not(target_os = "linux"))]
+    hotkeys: Option<Hotkeys>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -121,6 +127,8 @@ pub fn run(config: Config) -> Result<()> {
 
     let application = gpui_platform::application().with_assets(Assets);
     application.run(move |cx: &mut App| {
+        #[cfg(target_os = "macos")]
+        keep_out_of_dock();
         cx.set_quit_mode(QuitMode::Explicit);
         if let Err(error) = Assets::load_fonts(cx) {
             log::error!("cannot load the UI fonts: {error:#}");
@@ -140,6 +148,20 @@ pub fn run(config: Config) -> Result<()> {
     });
     std::fs::remove_file(socket_path()).ok();
     Ok(())
+}
+
+/// Runs the daemon as an accessory app: no Dock icon and no menu bar of its own, while its
+/// windows still open and take focus. GPUI makes every app a regular one at launch, so this has
+/// to come after.
+#[cfg(target_os = "macos")]
+fn keep_out_of_dock() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    if let Some(main_thread) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(main_thread)
+            .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
 }
 
 fn listen(daemon: Entity<Daemon>, mut receiver: UnboundedReceiver<Event>, cx: &mut App) {
@@ -173,6 +195,9 @@ impl Daemon {
         .map_err(|error| log::warn!("config: not watching for edits: {error:#}"))
         .ok();
 
+        #[cfg(not(target_os = "linux"))]
+        let hotkeys = start_hotkeys(&config, &events);
+
         let daemon = cx.new(|cx| {
             let mut daemon = Self {
                 store: store.clone(),
@@ -187,6 +212,8 @@ impl Daemon {
                 pill: None,
                 tray: None,
                 tray_events,
+                #[cfg(not(target_os = "linux"))]
+                hotkeys,
                 _watcher: watcher,
             };
             cx.observe(
@@ -232,7 +259,9 @@ impl Daemon {
             cx,
         );
 
-        // The pill waits folded from the start, so even the first session shows it at once.
+        // The pill waits folded from the start, so even the first session shows it at once. Other
+        // systems cannot pass clicks through a waiting window, so they open the pill per session.
+        #[cfg(target_os = "linux")]
         daemon.update(cx, |daemon, cx| {
             let config = daemon.store.read(cx).config().clone();
             let output = tokativ_input::focused_output();
@@ -335,6 +364,10 @@ impl Daemon {
         self.transcriber.preload(engine.clone());
         if let Some(inserter) = &self.inserter {
             inserter.begin();
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Some(hotkeys) = &mut self.hotkeys {
+            hotkeys.hold_session_keys(true);
         }
         log::info!("session {id}: listening with {}", engine.name());
         self.session = Some(Session {
@@ -677,6 +710,10 @@ impl Daemon {
         if let Some(inserter) = &self.inserter {
             inserter.end();
         }
+        #[cfg(not(target_os = "linux"))]
+        if let Some(hotkeys) = &mut self.hotkeys {
+            hotkeys.hold_session_keys(false);
+        }
         if dismiss && let Some(pill) = self.pill.as_ref().map(|placed| placed.handle) {
             cx.defer(move |cx| {
                 pill.update(cx, |pill, _, cx| pill.dismiss(cx)).ok();
@@ -719,6 +756,13 @@ impl Daemon {
         }
         if old.tray != config.tray {
             self.place_tray(config.tray, cx);
+        }
+        #[cfg(not(target_os = "linux"))]
+        if old.hotkey != config.hotkey
+            && let Some(hotkeys) = &mut self.hotkeys
+            && let Err(error) = hotkeys.set_toggle(&config.hotkey)
+        {
+            log::error!("hotkey: {error:#}");
         }
         if old.launch_at_login != config.launch_at_login
             && let Err(error) = autostart::apply(config.launch_at_login)
@@ -783,7 +827,7 @@ impl Daemon {
             }
             None => (
                 "Unavailable".to_string(),
-                Some("no Wayland connection".to_string()),
+                Some("text cannot be sent to other apps".to_string()),
             ),
         };
         self.status.update(cx, |status, cx| {
@@ -795,7 +839,7 @@ impl Daemon {
             };
             cx.notify();
         });
-        if let Some(tray) = &self.tray {
+        if let Some(tray) = &mut self.tray {
             tray.show(recording, shown);
         }
     }
@@ -824,6 +868,22 @@ fn set_phase(pill: WindowHandle<Pill>, phase: Phase, cx: &mut App) {
         pill.update(cx, |pill, window, cx| pill.set_phase(phase, window, cx))
             .ok();
     });
+}
+
+/// Registers the toggle hotkey, with every press fed back as an event. Without it the tray and
+/// the command line still start sessions.
+#[cfg(not(target_os = "linux"))]
+fn start_hotkeys(config: &Config, events: &UnboundedSender<Event>) -> Option<Hotkeys> {
+    let events = events.clone();
+    Hotkeys::new(&config.hotkey, move |pressed| {
+        let event = match pressed {
+            Pressed::Toggle => Event::Command(Command::Toggle),
+            Pressed::Key(key) => Event::Key(key),
+        };
+        events.unbounded_send(event).ok();
+    })
+    .map_err(|error| log::error!("hotkey: {error:#}"))
+    .ok()
 }
 
 /// Connects the text insertion, with Escape and Enter fed back as events.

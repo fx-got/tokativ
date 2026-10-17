@@ -27,7 +27,7 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboar
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
 
 use crate::keymap::{self, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V, MOD_CTRL, MOD_SHIFT};
-use crate::{Backend, Key, Method, Request, Status, clipboard, focus};
+use crate::{Backend, Key, KeyHandler, Method, Request, Status, clipboard, focus};
 
 /// The input method protocol rejects longer strings.
 const MAX_STRING: usize = 4000;
@@ -73,8 +73,6 @@ struct State {
     /// forwarded again.
     echoes: VecDeque<(u32, bool, Instant)>,
 }
-
-pub(crate) type KeyHandler = Box<dyn Fn(Key) + Send>;
 
 struct Worker {
     connection: Connection,

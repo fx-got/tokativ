@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 
 pub const APP_ID: &str = "tokativ";
 
+/// Option+Space on macOS, as other dictation apps use. Windows keeps Alt+Space for the window
+/// menu, so it takes Ctrl+Alt+Space.
+pub const DEFAULT_HOTKEY: &str = match cfg!(target_os = "macos") {
+    true => "alt+space",
+    false => "control+alt+space",
+};
+
 /// The model a fresh install dictates with: NVIDIA's Parakeet v3, which tells 25 European
 /// languages apart on its own. Models are named by their Hugging Face repository and file.
 pub const DEFAULT_MODEL: &str =
@@ -121,6 +128,10 @@ pub struct Config {
     pub models: Models,
     pub launch_at_login: bool,
     pub tray: bool,
+    /// The keys that start and confirm a session on macOS and Windows, which Tokativ registers
+    /// itself, such as `alt+space`. On Linux the compositor binds a key to `tokativ toggle`
+    /// instead and this is unused.
+    pub hotkey: String,
     /// Show a draft of the phrase being spoken at the cursor before it is final. Needs the input
     /// method.
     pub live_preview: bool,
@@ -142,6 +153,7 @@ impl Default for Config {
             models: Models::default(),
             launch_at_login: false,
             tray: true,
+            hotkey: DEFAULT_HOTKEY.to_owned(),
             live_preview: true,
             setup_done: false,
             style: Style::default(),
@@ -352,10 +364,14 @@ pub fn models_dir() -> PathBuf {
         .join("models")
 }
 
-/// Where the launch-at-login entry goes.
+/// Where the launch-at-login entry goes: the XDG autostart folder, or the user's LaunchAgents on
+/// macOS. Windows keeps the entry in the registry and only uses this folder in a sandbox.
 pub fn autostart_dir() -> PathBuf {
     if let Some(sandbox) = sandbox() {
         return sandbox.join("autostart");
+    }
+    if cfg!(target_os = "macos") {
+        return home().join("Library/LaunchAgents");
     }
     dirs::config_dir()
         .unwrap_or_else(|| home().join(".config"))

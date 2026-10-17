@@ -7,9 +7,15 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
+tokativ-config.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true
 serde_json.workspace = true
-tokativ-config.workspace = true
 wayland-client.workspace = true
 wayland-protocols-misc.workspace = true
 wl-clipboard-rs.workspace = true
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard.workspace = true
+enigo.workspace = true

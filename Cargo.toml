@@ -44,11 +44,36 @@ ui = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
 regex = "1.12"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 sha2 = "0.10"
-# GGUF speech models through ggml, on the graphics card through Vulkan when there is one.
-transcribe-cpp = { version = "0.4", default-features = false, features = ["vulkan"] }
+# GGUF speech models through ggml. Each crate that uses it picks the graphics backend for its
+# platform: Metal on macOS, Vulkan everywhere else.
+transcribe-cpp = { version = "0.4", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
 notify = "8.2"
+# Typing, the clipboard, global hotkeys and the tray on macOS and Windows, where the Wayland
+# protocols and the StatusNotifierItem tray do not exist.
+arboard = "3.7"
+enigo = "0.6"
+global-hotkey = "0.9"
+tray-icon = "0.26"
+# The control socket on Windows, which has no Unix sockets in std.
+interprocess = "2.4"
+# Launch at login on Windows.
+winreg = "0.56"
+windows-sys = "0.61"
+# The pill's window handle on Windows, to keep clicks on it from taking focus.
+raw-window-handle = "0.6"
+# Keeps the daemon out of the Dock on macOS.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSApplication",
+  "NSResponder",
+  "NSRunningApplication",
+] }
+# The daemon's memory and processor time where there is no /proc.
+memory-stats = "1.2"
+cpu-time = "1.0"
 
 [profile.release]
 lto = "thin"

@@ -1,10 +1,17 @@
-//! Puts dictated text into the focused app on Wayland. Three ways are tried in order: the
-//! input method protocol, a virtual keyboard that types each character, and the clipboard
-//! followed by a paste chord.
+//! Puts dictated text into the focused app. On Wayland three ways are tried in order: the input
+//! method protocol, a virtual keyboard that types each character, and the clipboard followed by
+//! a paste chord. macOS and Windows have no input method to hook into, so text is typed as
+//! keyboard events or pasted.
 
+#[cfg(target_os = "linux")]
 mod clipboard;
+#[cfg(target_os = "linux")]
 mod focus;
+#[cfg(target_os = "linux")]
 mod keymap;
+#[cfg(not(target_os = "linux"))]
+mod native;
+#[cfg(target_os = "linux")]
 mod wayland;
 
 use std::sync::mpsc::{self, Sender};
@@ -14,7 +21,15 @@ use std::thread;
 use anyhow::{Context as _, Result, anyhow};
 pub use tokativ_config::Backend;
 
+#[cfg(target_os = "linux")]
 pub use focus::{focused_app_id, focused_output, other_input_method};
+/// The worker that serves [`Request`]s on this platform.
+#[cfg(not(target_os = "linux"))]
+use native as backend;
+#[cfg(not(target_os = "linux"))]
+pub use native::{focused_app_id, focused_output, other_input_method};
+#[cfg(target_os = "linux")]
+use wayland as backend;
 
 /// The way text actually reaches apps, after the startup probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +63,13 @@ pub enum Key {
     Enter,
 }
 
+/// Runs on the insertion thread when Escape or Enter is pressed during a session.
+pub(crate) type KeyHandler = Box<dyn Fn(Key) + Send>;
+
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the Wayland worker shows drafts and pastes per app")
+)]
 pub(crate) enum Request {
     Begin,
     Preedit(String),
@@ -80,7 +102,7 @@ impl Inserter {
         thread::Builder::new()
             .name("insert".into())
             .spawn(move || {
-                wayland::run(
+                backend::run(
                     preferred,
                     terminals,
                     receiver,

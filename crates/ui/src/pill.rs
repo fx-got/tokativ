@@ -1,14 +1,15 @@
 //! The floating pill shown while a dictation session runs: cancel on the left, live bars in the
-//! middle, confirm on the right. It lives on its own layer surface that never takes keyboard
-//! focus, so the app being dictated into keeps it.
+//! middle, confirm on the right. It lives on its own layer surface on Wayland and in a floating
+//! window elsewhere, and never takes keyboard focus, so the app being dictated into keeps it.
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Hsla, Pixels, Size, SpringConfig, SpringState, Window,
+    App, Bounds, Context, Hsla, Pixels, Point, Size, SpringConfig, SpringState, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div,
     point, px, svg,
 };
@@ -178,57 +179,126 @@ pub fn open(
     let size = Size::new(WIDTH + SHADOW * 2., HEIGHT + SHADOW * 2.);
     // The shadow margin is part of the surface, so the visible gap to the edge takes it off.
     let gap = (px(margin) - SHADOW).max(Pixels::ZERO);
+    let (kind, origin) = placement(edge, gap, size, cx);
+    let on_confirm: Handler = Rc::new(on_confirm);
+    let on_cancel: Handler = Rc::new(on_cancel);
+    #[allow(
+        unused_mut,
+        reason = "only the floating window off Linux changes the options"
+    )]
+    let mut options = WindowOptions {
+        titlebar: None,
+        window_bounds: Some(WindowBounds::Windowed(Bounds { origin, size })),
+        app_id: Some(APP_ID.into()),
+        window_background: WindowBackgroundAppearance::Transparent,
+        // The pill never has focus, and without this its bars would drop to the throttled
+        // frame rate GPUI gives inactive windows.
+        inactive_frame_interval: None,
+        kind,
+        ..Default::default()
+    };
+    // A layer surface never takes focus. A floating window has to be told, or showing it would
+    // pull focus from the app being dictated into.
+    #[cfg(not(target_os = "linux"))]
+    {
+        options.focus = false;
+        options.is_movable = false;
+        options.is_resizable = false;
+        options.is_minimizable = false;
+    }
+    cx.open_window(options, move |window, cx| {
+        #[cfg(windows)]
+        never_activate(window);
+        window.set_input_region(Some(match resting {
+            true => &[],
+            false => &[REGION],
+        }));
+        cx.new(|_| Pill {
+            levels,
+            phase: Phase::Listening,
+            shown: [0.; BARS],
+            beat: None,
+            since: Instant::now(),
+            on_confirm,
+            on_cancel,
+            opened: Instant::now(),
+            closing: None,
+            body: Spring::new(OPEN),
+            controls: Spring::new(POP),
+            resting,
+            widened: false,
+        })
+    })
+}
+
+/// Where the pill goes: a layer surface anchored to the focused output's edge. `gap` is the
+/// distance from that edge to the window.
+#[cfg(target_os = "linux")]
+fn placement(
+    edge: PillEdge,
+    gap: Pixels,
+    _size: Size<Pixels>,
+    _cx: &App,
+) -> (WindowKind, Point<Pixels>) {
     let (anchor, margin) = match edge {
         PillEdge::Bottom => (Anchor::BOTTOM, (px(0.), px(0.), gap, px(0.))),
         PillEdge::Top => (Anchor::TOP, (gap, px(0.), px(0.), px(0.))),
     };
-    let on_confirm: Handler = Rc::new(on_confirm);
-    let on_cancel: Handler = Rc::new(on_cancel);
-    cx.open_window(
-        WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: point(px(0.), px(0.)),
-                size,
-            })),
-            app_id: Some(APP_ID.into()),
-            window_background: WindowBackgroundAppearance::Transparent,
-            // The pill never has focus, and without this its bars would drop to the throttled
-            // frame rate GPUI gives inactive windows.
-            inactive_frame_interval: None,
-            kind: WindowKind::LayerShell(LayerShellOptions {
-                namespace: APP_ID.into(),
-                layer: Layer::Overlay,
-                anchor,
-                exclusive_zone: Some(px(0.)),
-                margin: Some(margin),
-                keyboard_interactivity: KeyboardInteractivity::None,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        move |window, cx| {
-            window.set_input_region(Some(match resting {
-                true => &[],
-                false => &[REGION],
-            }));
-            cx.new(|_| Pill {
-                levels,
-                phase: Phase::Listening,
-                shown: [0.; BARS],
-                beat: None,
-                since: Instant::now(),
-                on_confirm,
-                on_cancel,
-                opened: Instant::now(),
-                closing: None,
-                body: Spring::new(OPEN),
-                controls: Spring::new(POP),
-                resting,
-                widened: false,
-            })
-        },
-    )
+    let kind = WindowKind::LayerShell(LayerShellOptions {
+        namespace: APP_ID.into(),
+        layer: Layer::Overlay,
+        anchor,
+        exclusive_zone: Some(px(0.)),
+        margin: Some(margin),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        ..Default::default()
+    });
+    (kind, point(px(0.), px(0.)))
+}
+
+/// Where the pill goes: a floating window centred on the primary display's edge, inside the
+/// area the dock or taskbar leaves free.
+#[cfg(not(target_os = "linux"))]
+fn placement(
+    edge: PillEdge,
+    gap: Pixels,
+    size: Size<Pixels>,
+    cx: &App,
+) -> (WindowKind, Point<Pixels>) {
+    let area = cx
+        .primary_display()
+        .map(|display| display.visible_bounds())
+        .unwrap_or_default();
+    let x = area.origin.x + (area.size.width - size.width) / 2.;
+    let y = match edge {
+        PillEdge::Bottom => area.origin.y + area.size.height - size.height - gap,
+        PillEdge::Top => area.origin.y + gap,
+    };
+    (WindowKind::PopUp, point(x, y))
+}
+
+/// Keeps a click on the pill from making it the foreground window, which would take focus from
+/// the app being dictated into. GPUI's pop-up windows can still be activated on Windows.
+#[cfg(windows)]
+fn never_activate(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+    };
+
+    // GPUI's own `window_handle` names the window inside GPUI, not the platform window.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let window = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: the handle belongs to a window this thread just created and still owns.
+    unsafe {
+        let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        SetWindowLongPtrW(window, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
+    }
 }
 
 impl Pill {
@@ -363,10 +433,14 @@ impl Render for Pill {
         }
         let elapsed = self.step();
         if !self.animate(elapsed, cx.reduce_motion()) {
-            // Folded: clear the surface, stop taking clicks and stop asking for frames.
+            // Folded: clear the surface, stop taking clicks and stop asking for frames. A floating
+            // window cannot let clicks through, so off Linux it closes and the next session opens
+            // a new one.
             self.resting = true;
             self.beat = None;
             window.set_input_region(Some(&[]));
+            #[cfg(not(target_os = "linux"))]
+            window.remove_window();
             return div().size_full();
         }
         window.request_animation_frame();
