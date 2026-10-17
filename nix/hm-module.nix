@@ -69,16 +69,23 @@ in
 
     xdg.dataFile = lib.mkMerge (
       map (
-        engine:
-        lib.listToAttrs (
-          map (file: {
-            name = "tokativ/models/${engine}/${file.name}";
-            value.source = pkgs.fetchurl {
-              inherit (file) url sha256;
-              name = "tokativ-${engine}-${file.name}";
-            };
-          }) models.${engine}
-        )
+        name:
+        let
+          model = models.${name};
+          folder = "tokativ/models/${lib.replaceStrings [ "/" ] [ "--" ] model.repo}";
+          stem = lib.removeSuffix ".gguf" model.file;
+        in
+        {
+          "${folder}/${model.file}".source = pkgs.fetchurl {
+            url = "https://huggingface.co/${model.repo}/resolve/main/${model.file}";
+            inherit (model) sha256;
+            name = "tokativ-${model.file}";
+          };
+          # The app counts a model as installed when this note sits beside the file.
+          "${folder}/${stem}.json".text = builtins.toJSON {
+            inherit (model) architecture sha256;
+          };
+        }
       ) cfg.prefetchModels
     );
 

@@ -10,63 +10,49 @@ use serde::{Deserialize, Serialize};
 
 pub const APP_ID: &str = "tokativ";
 
-/// A speech model the app can download and dictate with. Adding one takes a variant here, its
-/// files in the engine crate's catalog and an `Engine` implementation there.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Model {
-    #[default]
-    Parakeet,
-    Gigaam,
+/// The model a fresh install dictates with: NVIDIA's Parakeet v3, which tells 25 European
+/// languages apart on its own. Models are named by their Hugging Face repository and file.
+pub const DEFAULT_MODEL: &str =
+    "handy-computer/parakeet-tdt-0.6b-v3-gguf/parakeet-tdt-0.6b-v3-Q8_0.gguf";
+
+/// What older versions called their two models, mapped to the same models in GGUF form.
+const LEGACY_MODELS: [(&str, &str); 2] = [
+    ("parakeet", DEFAULT_MODEL),
+    (
+        "gigaam",
+        "handy-computer/gigaam-v3-e2e-ctc-gguf/gigaam-v3-e2e-ctc-Q8_0.gguf",
+    ),
+];
+
+/// Reads a model name, translating the names older versions wrote.
+fn model_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    Ok(LEGACY_MODELS
+        .iter()
+        .find(|(old, _)| *old == name)
+        .map_or(name, |(_, new)| (*new).to_owned()))
 }
 
-impl Model {
-    pub const ALL: [Self; 2] = [Self::Parakeet, Self::Gigaam];
+/// Which compute device the model runs on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Processor {
+    /// The graphics card when there is one, the CPU otherwise.
+    #[default]
+    Auto,
+    Cpu,
+    /// The graphics card through Vulkan.
+    Gpu,
+}
 
-    /// The short name the config, the CLI and the model folder use.
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Parakeet => "parakeet",
-            Self::Gigaam => "gigaam",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|model| model.id() == id)
-    }
+impl Processor {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Cpu, Self::Gpu];
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Parakeet => "Parakeet v3",
-            Self::Gigaam => "GigaAM v3",
-        }
-    }
-
-    pub fn maker(self) -> &'static str {
-        match self {
-            Self::Parakeet => "NVIDIA",
-            Self::Gigaam => "Sber",
-        }
-    }
-
-    /// One line on what the model is good at, for choosing between them.
-    pub fn summary(self) -> &'static str {
-        match self {
-            Self::Parakeet => {
-                "25 European languages, English and Russian among them. Tells them apart on its own."
-            }
-            Self::Gigaam => "Russian only, punctuated. The most accurate for Russian speech.",
-        }
-    }
-
-    /// The languages it transcribes, as ISO 639-1 codes.
-    pub fn languages(self) -> &'static [&'static str] {
-        match self {
-            Self::Parakeet => &[
-                "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt",
-                "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
-            ],
-            Self::Gigaam => &["ru"],
+            Self::Auto => "Automatic",
+            Self::Cpu => "CPU",
+            Self::Gpu => "Graphics card",
         }
     }
 }
@@ -125,8 +111,10 @@ impl PillEdge {
 pub struct Config {
     /// The capture device by its CPAL name. `None` follows the system default.
     pub input_device: Option<String>,
-    /// The model sessions dictate with.
-    pub model: Model,
+    /// The model sessions dictate with, as `owner/repository/file.gguf` on Hugging Face.
+    #[serde(deserialize_with = "model_name")]
+    pub model: String,
+    pub processor: Processor,
     pub vad: Vad,
     pub insertion: Insertion,
     pub pill: Pill,
@@ -145,7 +133,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             input_device: None,
-            model: Model::Parakeet,
+            model: DEFAULT_MODEL.to_owned(),
+            processor: Processor::Auto,
             vad: Vad::default(),
             insertion: Insertion::default(),
             pill: Pill::default(),
@@ -344,14 +333,14 @@ mod tests {
     fn keys_from_older_versions_are_ignored() {
         let config: Config =
             toml::from_str("language = \"auto\"\n[engines]\nauto = \"parakeet\"\n").unwrap();
-        assert_eq!(config.model, Model::Parakeet);
+        assert_eq!(config.model, DEFAULT_MODEL);
     }
 
     #[test]
     fn partial_file_fills_defaults() {
         let config: Config =
             toml::from_str("model = \"gigaam\"\n[vad]\nsilence_ms = 700\n").unwrap();
-        assert_eq!(config.model, Model::Gigaam);
+        assert!(config.model.starts_with("handy-computer/gigaam"));
         assert_eq!(config.vad.silence_ms, 700);
         assert_eq!(config.vad.max_segment_s, 20);
     }

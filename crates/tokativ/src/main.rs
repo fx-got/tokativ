@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
-use tokativ_config::{Config, Model, SANDBOX_VARIABLE, socket_path};
+use tokativ_config::{Config, SANDBOX_VARIABLE, socket_path};
 
 use crate::ipc::Command;
 
@@ -56,7 +56,7 @@ enum Verb {
     Cancel,
     /// Switch the model sessions dictate with
     Model {
-        #[arg(value_parser = Model::ALL.map(Model::id))]
+        /// An installed model as owner/repository/file.gguf
         model: String,
     },
     /// Open the settings window
@@ -67,12 +67,15 @@ enum Verb {
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-        "info,i18n=off,naga=warn,wgpu=warn,wgpu_hal=error,ort=warn,transcribe_rs=warn,zbus=warn,tracing=warn",
+        "info,i18n=off,naga=warn,wgpu=warn,wgpu_hal=error,zbus=warn,tracing=warn,transcribe_cpp=warn",
     ))
     .init();
     let cli = Cli::parse();
     let result = match cli.command {
-        None | Some(Verb::Daemon) => Config::load().and_then(daemon::run),
+        None | Some(Verb::Daemon) => {
+            tokativ_engine::route_native_logs();
+            Config::load().and_then(daemon::run)
+        }
         Some(Verb::Sandbox {
             keep,
             with_models,
@@ -97,9 +100,7 @@ fn command(verb: Verb) -> Command {
         Verb::Stop => Command::Stop,
         Verb::Confirm => Command::Confirm,
         Verb::Cancel => Command::Cancel,
-        Verb::Model { model } => {
-            Command::Model(Model::from_id(&model).expect("clap checked the model"))
-        }
+        Verb::Model { model } => Command::Model(model),
         Verb::Settings => Command::Settings,
         Verb::Quit => Command::Quit,
     }
@@ -134,6 +135,7 @@ fn sandbox(keep: bool, with_models: bool, step: Option<String>) -> Result<()> {
     if with_models {
         link_models(&real_models, &tokativ_config::models_dir())?;
     }
+    tokativ_engine::route_native_logs();
     eprintln!(
         "tokativ: sandbox in {0}\n  send commands with: {SANDBOX_VARIABLE}={0} tokativ toggle",
         folder.display()
@@ -144,12 +146,14 @@ fn sandbox(keep: bool, with_models: bool, step: Option<String>) -> Result<()> {
 /// Links every downloaded model file into the sandbox one by one. Folders of links rather than a
 /// link to the folder, so deleting a model in the sandbox removes only the links.
 fn link_models(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
-    for model in Model::ALL {
-        let source = from.join(model.id());
-        let Ok(files) = std::fs::read_dir(&source) else {
+    let Ok(folders) = std::fs::read_dir(from) else {
+        return Ok(());
+    };
+    for folder in folders.flatten().filter(|folder| folder.path().is_dir()) {
+        let Ok(files) = std::fs::read_dir(folder.path()) else {
             continue;
         };
-        let target = to.join(model.id());
+        let target = to.join(folder.file_name());
         std::fs::create_dir_all(&target)
             .with_context(|| format!("creating {}", target.display()))?;
         for file in files.flatten() {
@@ -167,7 +171,7 @@ fn link_models(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
 /// is not running, so a keybind works even before the service is up.
 fn send(command: Command) -> Result<()> {
     let path = socket_path();
-    let reply = match ipc::send(&path, command) {
+    let reply = match ipc::send(&path, &command) {
         Ok(reply) => reply,
         Err(error) if absent(&error) => {
             if !matches!(
@@ -179,7 +183,7 @@ fn send(command: Command) -> Result<()> {
             spawn_daemon()?;
             let deadline = Instant::now() + STARTUP;
             loop {
-                match ipc::send(&path, command) {
+                match ipc::send(&path, &command) {
                     Ok(reply) => break reply,
                     Err(error) if absent(&error) && Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(100));

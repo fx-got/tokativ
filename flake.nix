@@ -22,7 +22,6 @@
           freetype
           alsa-lib
           dbus
-          onnxruntime
         ];
     in
     {
@@ -36,11 +35,14 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
             cmake
+            gnumake
+            shaderc
           ];
-          buildInputs = runtimeLibraries pkgs ++ [ pkgs.openssl ];
+          buildInputs = runtimeLibraries pkgs ++ [
+            pkgs.openssl
+            pkgs.vulkan-headers
+          ];
           LD_LIBRARY_PATH = lib.makeLibraryPath (runtimeLibraries pkgs);
-          ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-          ORT_PREFER_DYNAMIC_LINK = "1";
           ALSA_PLUGIN_DIR = "${pkgs.symlinkJoin {
             name = "tokativ-alsa-plugins";
             paths = [

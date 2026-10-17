@@ -1,114 +1,106 @@
-//! Speech-to-text engines and the worker thread that runs them. Both engines are ONNX models
-//! run on the CPU through transcribe-rs.
+//! Speech-to-text and the worker thread that runs it. Models are GGUF files run by
+//! transcribe.cpp, on the graphics card through Vulkan when there is one.
 
 pub mod models;
 mod text;
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
-use tokativ_config::Model;
-use transcribe_rs::onnx::Quantization;
-use transcribe_rs::onnx::gigaam::GigaAMModel;
-use transcribe_rs::onnx::parakeet::ParakeetModel;
-use transcribe_rs::{OrtAccelerator, SpeechModel as _, TranscribeOptions};
+use tokativ_config::Processor;
+use transcribe_cpp::{Backend, ModelOptions, RunOptions, Session};
 
+pub use models::ModelId;
 pub use text::Joiner;
 
 /// A loaded speech-to-text model.
 pub trait Engine: Send {
-    /// Loads the model from its folder. Slow, so it runs on the worker thread.
-    fn load(dir: &Path) -> Result<Self>
-    where
-        Self: Sized;
-
     /// Transcribes 16 kHz mono audio.
     fn transcribe(&mut self, samples: &[f32]) -> Result<String>;
 
-    /// The languages the model understands, as ISO 639-1 codes.
-    fn languages(&self) -> &'static [&'static str];
+    /// The languages the model understands, as ISO 639-1 codes. Empty when the model does not
+    /// say.
+    fn languages(&self) -> Vec<String>;
+
+    /// The device the model runs on, as the user would name it.
+    fn device(&self) -> String;
 }
 
-/// NVIDIA's Parakeet TDT 0.6B v3. It picks the language itself from 25 European ones.
-pub struct Parakeet(ParakeetModel);
+/// Any model transcribe.cpp can load: Parakeet, GigaAM, Whisper, Canary and the rest.
+pub struct Gguf {
+    model: transcribe_cpp::Model,
+    session: Session,
+}
 
-impl Engine for Parakeet {
-    fn load(dir: &Path) -> Result<Self> {
-        ParakeetModel::load(dir, &Quantization::Int8)
-            .map(Self)
-            .map_err(|error| anyhow!("loading Parakeet from {}: {error}", dir.display()))
+impl Gguf {
+    /// Loads a model file on the device `processor` asks for. Slow, so it runs on the worker.
+    pub fn load(id: &ModelId, processor: Processor) -> Result<Self> {
+        if models::size_on_disk(id).is_none() {
+            return Err(anyhow!("{} is not downloaded", id.name()));
+        }
+        let backend = match processor {
+            Processor::Auto => Backend::Auto,
+            Processor::Cpu => Backend::Cpu,
+            Processor::Gpu => Backend::Vulkan,
+        };
+        let started = Instant::now();
+        let model = transcribe_cpp::Model::load_with(
+            id.path(),
+            &ModelOptions {
+                backend,
+                device: None,
+            },
+        )
+        .map_err(|error| anyhow!("loading {}: {error}", id.name()))?;
+        let session = model
+            .session()
+            .map_err(|error| anyhow!("starting {}: {error}", id.name()))?;
+        let engine = Self { model, session };
+        log::info!(
+            "engine: loaded {} ({}) on {} in {:.1?}",
+            id.name(),
+            engine.model.arch(),
+            engine.device(),
+            started.elapsed()
+        );
+        Ok(engine)
     }
+}
 
+impl Engine for Gguf {
     fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
-        self.0
-            .transcribe(samples, &TranscribeOptions::default())
-            .map(|result| result.text)
-            .map_err(|error| anyhow!("Parakeet: {error}"))
+        self.session
+            .run(samples, &RunOptions::default())
+            .map(|transcript| transcript.text)
+            .map_err(|error| anyhow!("transcribing: {error}"))
     }
 
-    fn languages(&self) -> &'static [&'static str] {
-        &[
-            "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt",
-            "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
-        ]
-    }
-}
-
-/// Sber's GigaAM v3, the end-to-end CTC export that writes punctuation and capitals.
-pub struct GigaAm(GigaAMModel);
-
-impl Engine for GigaAm {
-    fn load(dir: &Path) -> Result<Self> {
-        GigaAMModel::load(dir, &Quantization::Int8)
-            .map(Self)
-            .map_err(|error| anyhow!("loading GigaAM from {}: {error}", dir.display()))
+    fn languages(&self) -> Vec<String> {
+        self.model
+            .capabilities()
+            .map(|capabilities| capabilities.languages)
+            .unwrap_or_default()
     }
 
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
-        self.0
-            .transcribe(samples, &TranscribeOptions::default())
-            .map(|result| result.text)
-            .map_err(|error| anyhow!("GigaAM: {error}"))
+    fn device(&self) -> String {
+        match self.model.device() {
+            Ok(device) if !device.description.is_empty() => device.description,
+            _ => self.model.backend(),
+        }
     }
-
-    fn languages(&self) -> &'static [&'static str] {
-        &["ru"]
-    }
-}
-
-/// Loads the engine of `kind` from its installed folder.
-pub fn load(kind: Model) -> Result<Box<dyn Engine>> {
-    static CPU: Once = Once::new();
-    CPU.call_once(|| transcribe_rs::set_ort_accelerator(OrtAccelerator::CpuOnly));
-    if models::installed(kind).is_none() {
-        return Err(anyhow!("{} is not downloaded", kind.name()));
-    }
-    let dir = models::dir(kind);
-    let started = Instant::now();
-    let engine: Box<dyn Engine> = match kind {
-        Model::Parakeet => Box::new(Parakeet::load(&dir)?),
-        Model::Gigaam => Box::new(GigaAm::load(&dir)?),
-    };
-    log::info!(
-        "engine: loaded {} in {:.1?}",
-        kind.name(),
-        started.elapsed()
-    );
-    Ok(engine)
 }
 
 type Reply = Box<dyn FnOnce(Result<String>) + Send>;
 
 enum Job {
-    Preload(Model),
+    Preload(ModelId),
     Transcribe {
-        kind: Model,
+        model: ModelId,
         samples: Vec<f32>,
         reply: Reply,
     },
@@ -116,6 +108,8 @@ enum Job {
     Draft,
     /// Drop models after this long without a job. `None` keeps them.
     IdleLimit(Option<Duration>),
+    /// Reload models on another device from the next job on.
+    Processor(Processor),
 }
 
 /// The handle to the transcription thread. Jobs run one at a time in the order they were sent,
@@ -125,42 +119,55 @@ enum Job {
 pub struct Transcriber {
     jobs: Sender<Job>,
     draft: Arc<Mutex<Option<Draft>>>,
+    device: Arc<Mutex<Option<String>>>,
 }
 
 /// A transcription whose result is only shown, never kept. Only the newest one waits, so drafts
 /// never pile up behind a slow model.
 struct Draft {
-    kind: Model,
+    model: ModelId,
     samples: Vec<f32>,
     reply: Reply,
 }
 
 impl Transcriber {
-    pub fn start(idle: Option<Duration>) -> Result<Self> {
+    pub fn start(idle: Option<Duration>, processor: Processor) -> Result<Self> {
         let (jobs, receiver) = mpsc::channel();
         let draft = Arc::new(Mutex::new(None));
-        let drafts = draft.clone();
+        let device = Arc::new(Mutex::new(None));
+        let worker = Worker {
+            jobs: receiver,
+            drafts: draft.clone(),
+            device: device.clone(),
+            idle,
+            processor,
+            loaded: HashMap::new(),
+        };
         thread::Builder::new()
             .name("transcribe".into())
-            .spawn(move || work(receiver, drafts, idle))
+            .spawn(move || worker.run())
             .context("spawning the transcription thread")?;
-        Ok(Self { jobs, draft })
+        Ok(Self {
+            jobs,
+            draft,
+            device,
+        })
     }
 
-    /// Loads `kind` ahead of the first segment, so the first result is not held up by it.
-    pub fn preload(&self, kind: Model) {
-        self.jobs.send(Job::Preload(kind)).ok();
+    /// Loads `model` ahead of the first segment, so the first result is not held up by it.
+    pub fn preload(&self, model: ModelId) {
+        self.jobs.send(Job::Preload(model)).ok();
     }
 
-    /// Queues `samples` for transcription with `kind`. `reply` runs on the worker thread.
+    /// Queues `samples` for transcription with `model`. `reply` runs on the worker thread.
     pub fn transcribe(
         &self,
-        kind: Model,
+        model: ModelId,
         samples: Vec<f32>,
         reply: impl FnOnce(Result<String>) + Send + 'static,
     ) {
         let job = Job::Transcribe {
-            kind,
+            model,
             samples,
             reply: Box::new(reply),
         };
@@ -174,12 +181,12 @@ impl Transcriber {
     /// `reply` never runs.
     pub fn draft(
         &self,
-        kind: Model,
+        model: ModelId,
         samples: Vec<f32>,
         reply: impl FnOnce(Result<String>) + Send + 'static,
     ) {
         *self.draft.lock().expect("draft lock") = Some(Draft {
-            kind,
+            model,
             samples,
             reply: Box::new(reply),
         });
@@ -189,68 +196,105 @@ impl Transcriber {
     pub fn set_idle_limit(&self, idle: Option<Duration>) {
         self.jobs.send(Job::IdleLimit(idle)).ok();
     }
+
+    pub fn set_processor(&self, processor: Processor) {
+        self.jobs.send(Job::Processor(processor)).ok();
+    }
+
+    /// The device the most recently loaded model runs on, once one has loaded.
+    pub fn device(&self) -> Option<String> {
+        self.device.lock().expect("device lock").clone()
+    }
 }
 
-fn work(jobs: Receiver<Job>, drafts: Arc<Mutex<Option<Draft>>>, mut idle: Option<Duration>) {
-    let mut loaded: HashMap<Model, Box<dyn Engine>> = HashMap::new();
-    let mut last = Instant::now();
-    loop {
-        let wait = match (idle, loaded.is_empty()) {
-            (Some(limit), false) => limit.saturating_sub(last.elapsed()),
-            _ => Duration::from_secs(3600),
-        };
-        let job = match jobs.recv_timeout(wait) {
-            Ok(job) => job,
-            Err(RecvTimeoutError::Timeout) => {
-                if idle.is_some_and(|limit| last.elapsed() >= limit) && !loaded.is_empty() {
-                    log::info!("engine: unloading models after idling");
-                    loaded.clear();
-                }
-                continue;
-            }
-            Err(RecvTimeoutError::Disconnected) => return,
-        };
-        match job {
-            Job::Preload(kind) => {
-                if let Err(error) = engine(&mut loaded, kind) {
-                    log::error!("engine: {error:#}");
-                }
-            }
-            Job::Transcribe {
-                kind,
-                samples,
-                reply,
-            } => {
-                let started = Instant::now();
-                let result =
-                    engine(&mut loaded, kind).and_then(|engine| engine.transcribe(&samples));
-                log::debug!(
-                    "engine: {:.1} s of audio in {:.2?}",
-                    samples.len() as f32 / 16_000.,
-                    started.elapsed()
-                );
-                reply(result);
-            }
-            Job::Draft => {
-                let Some(draft) = drafts.lock().expect("draft lock").take() else {
+struct Worker {
+    jobs: Receiver<Job>,
+    drafts: Arc<Mutex<Option<Draft>>>,
+    device: Arc<Mutex<Option<String>>>,
+    idle: Option<Duration>,
+    processor: Processor,
+    loaded: HashMap<ModelId, Gguf>,
+}
+
+impl Worker {
+    fn run(mut self) {
+        let mut last = Instant::now();
+        loop {
+            let wait = match (self.idle, self.loaded.is_empty()) {
+                (Some(limit), false) => limit.saturating_sub(last.elapsed()),
+                _ => Duration::from_secs(3600),
+            };
+            let job = match self.jobs.recv_timeout(wait) {
+                Ok(job) => job,
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.idle.is_some_and(|limit| last.elapsed() >= limit)
+                        && !self.loaded.is_empty()
+                    {
+                        log::info!("engine: unloading models after idling");
+                        self.loaded.clear();
+                    }
                     continue;
-                };
-                let result = engine(&mut loaded, draft.kind)
-                    .and_then(|engine| engine.transcribe(&draft.samples));
-                (draft.reply)(result);
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            };
+            match job {
+                Job::Preload(model) => {
+                    if let Err(error) = self.engine(model) {
+                        log::error!("engine: {error:#}");
+                    }
+                }
+                Job::Transcribe {
+                    model,
+                    samples,
+                    reply,
+                } => {
+                    let started = Instant::now();
+                    let result = self
+                        .engine(model)
+                        .and_then(|engine| engine.transcribe(&samples));
+                    log::debug!(
+                        "engine: {:.1} s of audio in {:.2?}",
+                        samples.len() as f32 / 16_000.,
+                        started.elapsed()
+                    );
+                    reply(result);
+                }
+                Job::Draft => {
+                    let Some(draft) = self.drafts.lock().expect("draft lock").take() else {
+                        continue;
+                    };
+                    let result = self
+                        .engine(draft.model)
+                        .and_then(|engine| engine.transcribe(&draft.samples));
+                    (draft.reply)(result);
+                }
+                Job::IdleLimit(limit) => self.idle = limit,
+                Job::Processor(processor) => {
+                    if processor != self.processor {
+                        self.processor = processor;
+                        self.loaded.clear();
+                    }
+                }
             }
-            Job::IdleLimit(limit) => idle = limit,
+            last = Instant::now();
         }
-        last = Instant::now();
+    }
+
+    fn engine(&mut self, model: ModelId) -> Result<&mut Gguf> {
+        let engine = match self.loaded.entry(model) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let engine = Gguf::load(entry.key(), self.processor)?;
+                entry.insert(engine)
+            }
+        };
+        *self.device.lock().expect("device lock") = Some(engine.device());
+        Ok(engine)
     }
 }
 
-fn engine(
-    loaded: &mut HashMap<Model, Box<dyn Engine>>,
-    kind: Model,
-) -> Result<&mut Box<dyn Engine>> {
-    match loaded.entry(kind) {
-        Entry::Occupied(entry) => Ok(entry.into_mut()),
-        Entry::Vacant(entry) => Ok(entry.insert(load(kind)?)),
-    }
+/// Sends transcribe.cpp's and ggml's messages through the `log` crate instead of straight to
+/// stderr. Call once at startup, before any model loads.
+pub fn route_native_logs() {
+    transcribe_cpp::init_logging();
 }

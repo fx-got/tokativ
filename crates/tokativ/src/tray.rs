@@ -5,24 +5,26 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use ksni::blocking::{Handle, TrayMethods as _};
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem};
-use tokativ_config::{APP_ID, Model};
+use tokativ_config::APP_ID;
 
 const SIZE: i32 = 32;
 
 /// What a tray click asks of the daemon.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum TrayEvent {
     Toggle,
-    Model(Model),
+    /// Switch to the installed model with this name, `owner/repository/file.gguf`.
+    Model(String),
     Settings,
     Quit,
 }
 
-/// The models as the tray menu lists them.
+/// The models as the tray menu lists them: the one in use and every installed one, each with
+/// its full name and the name to show.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shown {
-    pub model: Model,
-    pub installed: Vec<Model>,
+    pub model: String,
+    pub installed: Vec<(String, String)>,
 }
 
 /// The running tray item. Dropping it removes the item from the panel.
@@ -75,7 +77,7 @@ impl Item {
     fn entry(label: &str, event: TrayEvent) -> MenuItem<Self> {
         StandardItem {
             label: label.into(),
-            activate: Box::new(move |item: &mut Self| item.send(event)),
+            activate: Box::new(move |item: &mut Self| item.send(event.clone())),
             ..Default::default()
         }
         .into()
@@ -111,7 +113,7 @@ impl ksni::Tray for Item {
             title: "Tokativ".into(),
             description: match self.recording {
                 true => "Dictating".into(),
-                false => format!("Ready, {}", self.shown.model.name()),
+                false => "Ready".to_string(),
             },
             ..Default::default()
         }
@@ -130,28 +132,25 @@ impl ksni::Tray for Item {
             Self::entry(toggle, TrayEvent::Toggle),
             MenuItem::Separator,
             RadioGroup {
-                selected: Model::ALL
+                selected: self
+                    .shown
+                    .installed
                     .iter()
-                    .position(|model| *model == self.shown.model)
-                    .unwrap_or(0),
+                    .position(|(model, _)| *model == self.shown.model)
+                    .unwrap_or(usize::MAX),
                 select: Box::new(|item: &mut Self, index| {
-                    if let Some(model) = Model::ALL.get(index) {
-                        item.shown.model = *model;
-                        item.send(TrayEvent::Model(*model));
+                    if let Some((model, _)) = item.shown.installed.get(index).cloned() {
+                        item.shown.model = model.clone();
+                        item.send(TrayEvent::Model(model));
                     }
                 }),
-                options: Model::ALL
+                options: self
+                    .shown
+                    .installed
                     .iter()
-                    .map(|model| {
-                        let installed = self.shown.installed.contains(model);
-                        RadioItem {
-                            label: match installed {
-                                true => model.name().into(),
-                                false => format!("{} (not downloaded)", model.name()),
-                            },
-                            enabled: installed,
-                            ..Default::default()
-                        }
+                    .map(|(_, name)| RadioItem {
+                        label: name.clone(),
+                        ..Default::default()
                     })
                     .collect(),
             }

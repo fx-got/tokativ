@@ -1,68 +1,64 @@
-//! Silero VAD v6, run through ONNX Runtime on 512-sample frames. The model ships inside the
-//! binary, it is 2 MB.
+//! Silero VAD v6.2, run through transcribe.cpp on 512-sample frames. The model ships inside the
+//! binary, it is 1.2 MB, and is written out once to the cache folder for the engine to load.
 
-use anyhow::{Result, anyhow};
-use ndarray::{Array2, Array3, Axis, concatenate, s};
-use ort::session::Session;
-use ort::value::TensorRef;
+use std::path::PathBuf;
 
-use crate::{FRAME, RATE, SpeechDetector};
+use anyhow::{Context as _, Result, anyhow};
+use transcribe_cpp::{Backend, Model, ModelOptions, VadSession};
 
-const MODEL: &[u8] = include_bytes!("../../../assets/silero/silero_vad.onnx");
-/// The tail of the previous frame the model expects in front of each new one.
-const CONTEXT: usize = 64;
+use crate::{FRAME, SpeechDetector};
+
+const MODEL: &[u8] = include_bytes!("../../../assets/silero/silero-vad-v6.2-F32.gguf");
 
 /// A Silero detector with its recurrent state. One instance follows one audio stream.
 pub struct Silero {
-    session: Session,
-    state: Array3<f32>,
-    context: Vec<f32>,
+    session: VadSession,
 }
 
 impl Silero {
     pub fn new() -> Result<Self> {
-        let session = build().map_err(|error| anyhow!("loading the Silero VAD model: {error}"))?;
-        Ok(Self {
-            session,
-            state: Array3::zeros((2, 1, 128)),
-            context: vec![0.; CONTEXT],
-        })
-    }
-
-    fn run(&mut self, frame: &[f32; FRAME]) -> Result<f32> {
-        let context = Array2::from_shape_vec((1, CONTEXT), self.context.clone())?;
-        let current = Array2::from_shape_vec((1, FRAME), frame.to_vec())?;
-        let input = concatenate(Axis(1), &[context.view(), current.view()])?;
-        let rate = ndarray::arr0(RATE as i64);
-        let outputs = self.session.run(ort::inputs![
-            "input" => TensorRef::from_array_view(input.view())?,
-            "state" => TensorRef::from_array_view(self.state.view())?,
-            "sr" => TensorRef::from_array_view(rate.view())?,
-        ])?;
-        let probability = outputs["output"].try_extract_array::<f32>()?[[0, 0]];
-        self.state = outputs["stateN"]
-            .try_extract_array::<f32>()?
-            .to_owned()
-            .into_dimensionality()?;
-        self.context = input.slice(s![0, FRAME..]).to_vec();
-        Ok(probability)
+        let path = model_file()?;
+        // The model is tiny and runs a frame at a time, so the CPU is faster than a round trip
+        // to the graphics card.
+        let model = Model::load_with(
+            &path,
+            &ModelOptions {
+                backend: Backend::Cpu,
+                device: None,
+            },
+        )
+        .map_err(|error| anyhow!("loading the Silero VAD model: {error}"))?;
+        let session = model
+            .vad_session()
+            .map_err(|error| anyhow!("starting the Silero VAD: {error}"))?;
+        Ok(Self { session })
     }
 }
 
-fn build() -> ort::Result<Session> {
-    let session = Session::builder()?
-        .with_intra_threads(1)?
-        .with_inter_threads(1)?
-        .commit_from_memory(MODEL)?;
-    Ok(session)
+/// The bundled model on disk, written there the first time or whenever it changed.
+fn model_file() -> Result<PathBuf> {
+    let folder = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(tokativ_config::APP_ID);
+    let path = folder.join("silero-vad-v6.2-F32.gguf");
+    let current = std::fs::metadata(&path).is_ok_and(|meta| meta.len() == MODEL.len() as u64);
+    if !current {
+        std::fs::create_dir_all(&folder)
+            .with_context(|| format!("creating {}", folder.display()))?;
+        std::fs::write(&path, MODEL).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(path)
 }
 
 impl SpeechDetector for Silero {
     fn probability(&mut self, frame: &[f32; FRAME]) -> f32 {
-        self.run(frame).unwrap_or_else(|error| {
-            log::warn!("vad: {error:#}");
-            0.
-        })
+        match self.session.stream_feed(frame) {
+            Ok(result) => result.probs.last().copied().unwrap_or(0.),
+            Err(error) => {
+                log::warn!("vad: {error}");
+                0.
+            }
+        }
     }
 }
 

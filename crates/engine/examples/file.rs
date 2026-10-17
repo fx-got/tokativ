@@ -7,15 +7,15 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use tokativ_audio::{Silero, Timing};
-use tokativ_config::Model;
-use tokativ_engine::Joiner;
+use tokativ_config::Processor;
+use tokativ_engine::{Engine as _, Gguf, Joiner, ModelId};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let kind = args
+    let model = args
         .next()
-        .and_then(|id| Model::from_id(&id))
-        .context("first argument: parakeet or gigaam")?;
+        .and_then(|id| ModelId::parse(&id))
+        .context("first argument: a model as owner/repo/file.gguf")?;
     let path = args.next().context("second argument: a wav file")?;
     let mut reader = hound::WavReader::open(&path)?;
     let spec = reader.spec();
@@ -44,7 +44,13 @@ fn main() -> Result<()> {
     let segments = tokativ_audio::segments(&samples, timing, &mut Silero::new()?);
     println!("{} segments in {:.2?}", segments.len(), started.elapsed());
 
-    let mut engine = tokativ_engine::load(kind)?;
+    let processor = match std::env::args().nth(3).as_deref() {
+        Some("cpu") => Processor::Cpu,
+        Some("gpu") => Processor::Gpu,
+        _ => Processor::Auto,
+    };
+    let mut engine = Gguf::load(&model, processor)?;
+    println!("running on {}", engine.device());
     let mut joiner = Joiner::new(None);
     for segment in segments {
         let started = Instant::now();

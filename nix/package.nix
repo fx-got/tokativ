@@ -6,8 +6,9 @@
   cmake,
   makeWrapper,
   autoPatchelfHook,
-  onnxruntime,
   openssl,
+  shaderc,
+  vulkan-headers,
   alsa-lib,
   alsa-plugins,
   pipewire,
@@ -64,13 +65,16 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     cmake
+    # glslc, which compiles ggml's Vulkan shaders
+    shaderc
     makeWrapper
     autoPatchelfHook
   ];
 
   buildInputs = [
-    onnxruntime
     openssl
+    vulkan-headers
+    vulkan-loader
     alsa-lib
     dbus
     fontconfig
@@ -86,13 +90,12 @@ rustPlatform.buildRustPackage {
     libxkbcommon
   ];
 
-  # Link the onnxruntime from nixpkgs instead of letting ort download its own.
-  ORT_LIB_LOCATION = "${onnxruntime}/lib";
-  ORT_PREFER_DYNAMIC_LINK = "1";
-
   preBuild = ''
     ln -s ${sonora}/assets "$NIX_BUILD_TOP/assets"
   '';
+
+  # cmake is only here for transcribe.cpp's build script, not to configure this package.
+  dontUseCmakeConfigure = true;
 
   # The tests need a microphone, a Wayland seat or downloaded models in places.
   doCheck = false;
@@ -108,7 +111,7 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = {
-    description = "Local dictation for Wayland, with Parakeet and GigaAM";
+    description = "Local dictation for Wayland";
     mainProgram = "tokativ";
     license = with lib.licenses; [
       gpl3Plus

@@ -9,8 +9,8 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, KeyBinding, QuitMode, WindowHandle};
 use notify::{RecursiveMode, Watcher as _};
 use tokativ_audio::{Levels, Options, Recorder, Silero, SpeechDetector, Timing};
-use tokativ_config::{Config, Model, config_dir, config_path, socket_path};
-use tokativ_engine::{Joiner, Transcriber};
+use tokativ_config::{Config, config_dir, config_path, socket_path};
+use tokativ_engine::{Joiner, ModelId, Transcriber};
 use tokativ_input::{Inserter, Key, Method};
 use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
 
@@ -23,6 +23,8 @@ use crate::tray::{Shown, Tray, TrayEvent};
 const PLACEHOLDER: &str = "…";
 /// How much new speech triggers another draft transcript.
 const DRAFT_EVERY: Duration = Duration::from_millis(600);
+/// How often the daemon looks whether a model finished loading on some device.
+const DEVICE_POLL: Duration = Duration::from_secs(2);
 
 /// Everything that reaches the daemon from another thread.
 enum Event {
@@ -61,7 +63,7 @@ impl Placed {
 /// One press of the hotkey to the pill closing.
 struct Session {
     id: u64,
-    engine: Model,
+    engine: ModelId,
     /// The microphone, once it has opened.
     recorder: Option<Recorder>,
     /// Created at the first insertion, once the input method may have reported the text
@@ -107,7 +109,7 @@ pub struct Daemon {
 /// Starts the daemon and blocks until it quits.
 pub fn run(config: Config) -> Result<()> {
     // A second start is not a failure, so a service manager does not keep retrying it.
-    if ipc::send(&socket_path(), Command::Ping).is_ok() {
+    if ipc::send(&socket_path(), &Command::Ping).is_ok() {
         log::info!("tokativ is already running");
         return Ok(());
     }
@@ -152,7 +154,7 @@ fn listen(daemon: Entity<Daemon>, mut receiver: UnboundedReceiver<Event>, cx: &m
 impl Daemon {
     fn new(config: Config, events: UnboundedSender<Event>, cx: &mut App) -> Result<Entity<Self>> {
         let (store, library, status) = tokativ_ui::entities(config.clone(), cx);
-        let transcriber = Transcriber::start(idle_limit(&config))?;
+        let transcriber = Transcriber::start(idle_limit(&config), config.processor)?;
         let inserter = start_inserter(&config, &events);
 
         let (tray_events, mut tray_receiver) = unbounded();
@@ -198,6 +200,22 @@ impl Daemon {
             cx.observe(&library, |this: &mut Self, _, cx| this.publish(cx))
                 .detach();
             daemon.place_tray(config.tray, cx);
+            // Models load on the worker thread, so the device they landed on is checked for
+            // rather than announced.
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(DEVICE_POLL).await;
+                    let alive = this.update(cx, |this, cx| {
+                        if this.status.read(cx).device != this.transcriber.device() {
+                            this.publish(cx);
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                }
+            })
+            .detach();
             daemon.publish(cx);
             daemon.preload(cx);
             daemon
@@ -302,18 +320,19 @@ impl Daemon {
             return;
         }
         let config = self.store.read(cx).config().clone();
-        let engine = config.model;
-        if !self.library.read(cx).installed(engine) {
-            log::warn!("session: {} is not downloaded", engine.name());
+        let Some(engine) =
+            ModelId::parse(&config.model).filter(|engine| self.library.read(cx).installed(engine))
+        else {
+            log::warn!("session: {} is not downloaded", config.model);
             self.open_setup(cx);
             return;
-        }
+        };
 
         self.next_session += 1;
         let id = self.next_session;
         let levels = Levels::default();
         self.show_pill(levels.clone(), &config, cx);
-        self.transcriber.preload(engine);
+        self.transcriber.preload(engine.clone());
         if let Some(inserter) = &self.inserter {
             inserter.begin();
         }
@@ -528,21 +547,24 @@ impl Daemon {
                     inserter.preedit(PLACEHOLDER.into());
                 }
                 let events = self.events.clone();
-                self.transcriber
-                    .transcribe(session.engine, segment.samples, move |result| {
+                self.transcriber.transcribe(
+                    session.engine.clone(),
+                    segment.samples,
+                    move |result| {
                         events
                             .unbounded_send(Event::Transcribed {
                                 session: id,
                                 result,
                             })
                             .ok();
-                    });
+                    },
+                );
             }
             tokativ_audio::Event::Progress(samples) => {
                 let segment = session.spoken;
                 let events = self.events.clone();
                 self.transcriber
-                    .draft(session.engine, samples, move |result| {
+                    .draft(session.engine.clone(), samples, move |result| {
                         events
                             .unbounded_send(Event::Drafted {
                                 session: id,
@@ -661,9 +683,11 @@ impl Daemon {
 
     /// Switches the model sessions dictate with, keeping the choice in the config. A model that
     /// is not downloaded opens the setup window instead.
-    fn set_model(&mut self, model: Model, cx: &mut Context<Self>) {
-        if !self.library.read(cx).installed(model) {
-            log::warn!("model: {} is not downloaded", model.name());
+    fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
+        let installed =
+            ModelId::parse(&model).is_some_and(|id| self.library.read(cx).installed(&id));
+        if !installed {
+            log::warn!("model: {model} is not downloaded");
             self.open_setup(cx);
             return;
         }
@@ -675,11 +699,12 @@ impl Daemon {
     /// Applies a changed config. Session settings take effect from the next session.
     fn apply(&mut self, config: Config, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.applied, config.clone());
-        if old.model != config.model {
-            log::info!("model: {}", config.model.name());
-            if self.library.read(cx).installed(config.model) {
-                self.transcriber.preload(config.model);
-            }
+        if old.processor != config.processor {
+            self.transcriber.set_processor(config.processor);
+        }
+        if old.model != config.model || old.processor != config.processor {
+            log::info!("model: {} on {:?}", config.model, config.processor);
+            self.preload(cx);
         }
         if old.insertion.backend != config.insertion.backend {
             self.inserter = start_inserter(&config, &self.events);
@@ -707,8 +732,10 @@ impl Daemon {
         if config.models.unload_after_minutes != 0 {
             return;
         }
-        if self.library.read(cx).installed(config.model) {
-            self.transcriber.preload(config.model);
+        if let Some(id) = ModelId::parse(&config.model)
+            && self.library.read(cx).installed(&id)
+        {
+            self.transcriber.preload(id);
         }
     }
 
@@ -731,10 +758,11 @@ impl Daemon {
     fn shown(&self, cx: &App) -> Shown {
         let library = self.library.read(cx);
         Shown {
-            model: self.store.read(cx).config().model,
-            installed: Model::ALL
-                .into_iter()
-                .filter(|model| library.installed(*model))
+            model: self.store.read(cx).config().model.clone(),
+            installed: library
+                .installed_models()
+                .iter()
+                .map(|model| (model.id.key(), model.id.name()))
                 .collect(),
         }
     }
@@ -743,6 +771,7 @@ impl Daemon {
     fn publish(&mut self, cx: &mut Context<Self>) {
         let recording = self.session.is_some();
         let shown = self.shown(cx);
+        let device = self.transcriber.device();
         let (method, note) = match &self.inserter {
             Some(inserter) => {
                 let status = inserter.status();
@@ -758,6 +787,7 @@ impl Daemon {
                 method,
                 note,
                 recording,
+                device,
             };
             cx.notify();
         });

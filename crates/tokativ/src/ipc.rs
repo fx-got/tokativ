@@ -8,17 +8,17 @@ use std::time::Duration;
 use std::{fs, thread};
 
 use anyhow::{Context as _, Result, bail};
-use tokativ_config::Model;
 
 /// What a client can ask the daemon to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Toggle,
     Start,
     Stop,
     Confirm,
     Cancel,
-    Model(Model),
+    /// Switch to a model, named `owner/repository/file.gguf`.
+    Model(String),
     Settings,
     Quit,
     Ping,
@@ -36,9 +36,7 @@ impl Command {
             (Some("settings"), None) => Self::Settings,
             (Some("quit"), None) => Self::Quit,
             (Some("ping"), None) => Self::Ping,
-            (Some("model"), Some(model)) => Self::Model(
-                Model::from_id(model).with_context(|| format!("unknown model {model:?}"))?,
-            ),
+            (Some("model"), Some(model)) => Self::Model(model.to_owned()),
             _ => bail!("unknown command {line:?}"),
         };
         if words.next().is_some() {
@@ -47,14 +45,14 @@ impl Command {
         Ok(command)
     }
 
-    pub fn line(self) -> String {
+    pub fn line(&self) -> String {
         match self {
             Self::Toggle => "toggle".into(),
             Self::Start => "start".into(),
             Self::Stop => "stop".into(),
             Self::Confirm => "confirm".into(),
             Self::Cancel => "cancel".into(),
-            Self::Model(model) => format!("model {}", model.id()),
+            Self::Model(model) => format!("model {model}"),
             Self::Settings => "settings".into(),
             Self::Quit => "quit".into(),
             Self::Ping => "ping".into(),
@@ -115,7 +113,7 @@ fn answer(stream: UnixStream, deliver: &impl Fn(Command)) -> Result<()> {
 
 /// Sends one command to a running daemon and returns its reply. Errors with
 /// [`ErrorKind::NotFound`] or [`ErrorKind::ConnectionRefused`] inside when no daemon listens.
-pub fn send(path: &Path, command: Command) -> std::io::Result<String> {
+pub fn send(path: &Path, command: &Command) -> std::io::Result<String> {
     let stream = UnixStream::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     writeln!(&stream, "{}", command.line())?;
@@ -136,15 +134,14 @@ mod tests {
             Command::Stop,
             Command::Confirm,
             Command::Cancel,
-            Command::Model(Model::Parakeet),
-            Command::Model(Model::Gigaam),
+            Command::Model(tokativ_config::DEFAULT_MODEL.into()),
             Command::Settings,
             Command::Quit,
             Command::Ping,
         ] {
             assert_eq!(Command::parse(&command.line()).unwrap(), command);
         }
-        assert!(Command::parse("model whisper").is_err());
+        assert!(Command::parse("model").is_err());
         assert!(Command::parse("toggle now").is_err());
     }
 }

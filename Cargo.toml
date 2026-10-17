@@ -41,13 +41,10 @@ gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "439295d5c1e21
 ] }
 icons = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
 ui = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
-ndarray = "0.17"
-# transcribe-rs asks for ^2.0.0-rc.12 but breaks on rc.14, and rc.12 is the newest that runs on
-# the onnxruntime nixpkgs ships.
-ort = "=2.0.0-rc.12"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 sha2 = "0.10"
-transcribe-rs = { version = "0.3.12", features = ["onnx"] }
+# GGUF speech models through ggml, on the graphics card through Vulkan when there is one.
+transcribe-cpp = { version = "0.4", default-features = false, features = ["vulkan"] }
 clap = { version = "4.5", features = ["derive"] }
 ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
 notify = "8.2"

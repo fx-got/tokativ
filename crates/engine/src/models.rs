@@ -1,6 +1,6 @@
-//! The model catalog and its files under `$XDG_DATA_HOME/tokativ/models/<engine>`. Every file is
-//! fetched from Hugging Face and checked against a known SHA-256 before the folder counts as
-//! installed.
+//! Speech models as GGUF files from Hugging Face: the suggested ones, the ones installed under
+//! `$XDG_DATA_HOME/tokativ/models`, downloads checked against the hash Hugging Face publishes,
+//! and search over the hub for models the engine can run.
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Read as _, Write as _};
@@ -8,97 +8,201 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, bail};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokativ_config::{Model, models_dir};
+use tokativ_config::models_dir;
 
-/// One file of a model: where it comes from, the name the engine loads it by, and what it must
-/// hash to.
-pub struct Remote {
-    pub url: &'static str,
-    pub name: &'static str,
-    pub size: u64,
-    pub sha256: &'static str,
+const HUB: &str = "https://huggingface.co";
+/// The architectures transcribe.cpp transcribes, as GGUF files name them. Search hides the rest.
+pub const ARCHITECTURES: &[&str] = &[
+    "canary",
+    "canary_qwen",
+    "cohere_asr",
+    "funasr_nano",
+    "gigaam",
+    "granite_speech",
+    "granite_speech5_ctc",
+    "granite_speech_nar",
+    "medasr",
+    "moonshine",
+    "moonshine_streaming",
+    "moss",
+    "parakeet",
+    "qwen3_asr",
+    "sensevoice",
+    "voxtral",
+    "voxtral_realtime",
+    "whisper",
+];
+/// Which quantization to offer first when a repository has several, best trade-off first.
+const QUANT_PREFERENCE: &[&str] = &["Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "F16", "F32"];
+
+/// A model file on Hugging Face, written `owner/repository/file.gguf`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ModelId {
+    pub repo: String,
+    pub file: String,
 }
 
-const PARAKEET: &[Remote] = &[
-    Remote {
-        url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.int8.onnx",
-        name: "encoder-model.int8.onnx",
-        size: 652_183_999,
-        sha256: "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09",
-    },
-    Remote {
-        url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.int8.onnx",
-        name: "decoder_joint-model.int8.onnx",
-        size: 18_202_004,
-        sha256: "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70",
-    },
-    Remote {
-        url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/nemo128.onnx",
-        name: "nemo128.onnx",
-        size: 139_764,
-        sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f",
-    },
-    Remote {
-        url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt",
-        name: "vocab.txt",
-        size: 93_939,
-        sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
-    },
-];
-
-const GIGAAM: &[Remote] = &[
-    Remote {
-        url: "https://huggingface.co/istupakov/gigaam-v3-onnx/resolve/main/v3_e2e_ctc.int8.onnx",
-        name: "model.int8.onnx",
-        size: 224_893_347,
-        sha256: "2e3fcb7a7b66030336fd10c2fcfb033bd1dc7e1bf238fe5cfd83b1d0cfc9d28e",
-    },
-    Remote {
-        url: "https://huggingface.co/istupakov/gigaam-v3-onnx/resolve/main/v3_e2e_ctc_vocab.txt",
-        name: "vocab.txt",
-        size: 2_007,
-        sha256: "142de7570b3de5b3035ce111a89c228e80e6085273731d944093ddf24fa539cd",
-    },
-];
-
-/// The files a model is made of.
-pub fn files(kind: Model) -> &'static [Remote] {
-    match kind {
-        Model::Parakeet => PARAKEET,
-        Model::Gigaam => GIGAAM,
+impl ModelId {
+    pub fn parse(id: &str) -> Option<Self> {
+        let (repo, file) = id.rsplit_once('/')?;
+        (repo.contains('/') && file.ends_with(".gguf")).then(|| Self {
+            repo: repo.to_owned(),
+            file: file.to_owned(),
+        })
     }
-}
 
-/// The download size of a model in bytes.
-pub fn download_size(kind: Model) -> u64 {
-    files(kind).iter().map(|file| file.size).sum()
-}
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.repo, self.file)
+    }
 
-/// The folder a model is loaded from.
-pub fn dir(kind: Model) -> PathBuf {
-    models_dir().join(kind.id())
-}
+    /// The local file, in a folder per repository.
+    pub fn path(&self) -> PathBuf {
+        models_dir()
+            .join(self.repo.replace('/', "--"))
+            .join(&self.file)
+    }
 
-/// The bytes a model takes on disk when all its files are present, or `None` when any is
-/// missing or the wrong size.
-pub fn installed(kind: Model) -> Option<u64> {
-    let dir = dir(kind);
-    files(kind).iter().try_fold(0, |total, file| {
-        let size = fs::metadata(dir.join(file.name)).ok()?.len();
-        (size == file.size).then_some(total + size)
-    })
-}
+    fn info_path(&self) -> PathBuf {
+        self.path().with_extension("json")
+    }
 
-/// Removes a model's folder.
-pub fn delete(kind: Model) -> Result<()> {
-    let dir = dir(kind);
-    match fs::remove_dir_all(&dir) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("removing {}", dir.display()))
+    fn url(&self) -> String {
+        format!("{HUB}/{}/resolve/main/{}", self.repo, self.file)
+    }
+
+    /// A readable name: the repository without its owner and `-gguf` suffix, and the
+    /// quantization when the file names one.
+    pub fn name(&self) -> String {
+        if let Some(suggested) = suggested(self) {
+            return suggested.name.to_owned();
         }
-        _ => Ok(()),
+        let repo = self.repo.rsplit('/').next().unwrap_or(&self.repo);
+        let base = repo
+            .trim_end_matches("-gguf")
+            .trim_end_matches("-GGUF")
+            .to_owned();
+        match quantization(&self.file) {
+            Some(quant) => format!("{base} {quant}"),
+            None => base,
+        }
     }
+}
+
+/// A model worth offering before anyone searches.
+pub struct Suggested {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub maker: &'static str,
+    pub summary: &'static str,
+}
+
+pub const SUGGESTED: &[Suggested] = &[
+    Suggested {
+        id: tokativ_config::DEFAULT_MODEL,
+        name: "Parakeet v3",
+        maker: "NVIDIA",
+        summary: "25 European languages, English and Russian among them. Tells them apart on its own.",
+    },
+    Suggested {
+        id: "handy-computer/gigaam-v3-e2e-ctc-gguf/gigaam-v3-e2e-ctc-Q8_0.gguf",
+        name: "GigaAM v3",
+        maker: "Sber",
+        summary: "Russian only, punctuated. The most accurate for Russian speech.",
+    },
+    Suggested {
+        id: "handy-computer/whisper-large-v3-turbo-gguf/whisper-large-v3-turbo-Q8_0.gguf",
+        name: "Whisper large v3 turbo",
+        maker: "OpenAI",
+        summary: "Around 100 languages. Slower than Parakeet, best with a graphics card.",
+    },
+    Suggested {
+        id: "handy-computer/canary-1b-v2-gguf/canary-1b-v2-Q8_0.gguf",
+        name: "Canary 1B v2",
+        maker: "NVIDIA",
+        summary: "25 European languages with punctuation, a larger sibling of Parakeet.",
+    },
+];
+
+/// The suggested entry for a model, if it is one.
+pub fn suggested(id: &ModelId) -> Option<&'static Suggested> {
+    let key = id.key();
+    SUGGESTED.iter().find(|suggested| suggested.id == key)
+}
+
+/// What is kept beside each downloaded file.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Info {
+    architecture: String,
+    sha256: String,
+}
+
+/// A model on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Installed {
+    pub id: ModelId,
+    pub bytes: u64,
+    pub architecture: String,
+}
+
+/// Every downloaded model, sorted by name.
+pub fn installed() -> Vec<Installed> {
+    let Ok(folders) = fs::read_dir(models_dir()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Installed> = folders
+        .flatten()
+        .filter(|folder| folder.path().is_dir())
+        .flat_map(|folder| {
+            let repo = folder.file_name().to_string_lossy().replace("--", "/");
+            fs::read_dir(folder.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(move |file| {
+                    let name = file.file_name().to_string_lossy().into_owned();
+                    let id = ModelId {
+                        repo: repo.clone(),
+                        file: name,
+                    };
+                    let bytes = file.metadata().ok()?.len();
+                    let info: Info = fs::read_to_string(id.info_path())
+                        .ok()
+                        .and_then(|text| serde_json::from_str(&text).ok())?;
+                    id.file.ends_with(".gguf").then_some(Installed {
+                        id,
+                        bytes,
+                        architecture: info.architecture,
+                    })
+                })
+        })
+        .collect();
+    found.sort_by_key(|model| model.id.name().to_lowercase());
+    found
+}
+
+/// The bytes a model takes on disk, or `None` when it is not downloaded.
+pub fn size_on_disk(id: &ModelId) -> Option<u64> {
+    if !id.info_path().exists() {
+        return None;
+    }
+    Some(fs::metadata(id.path()).ok()?.len())
+}
+
+pub fn delete(id: &ModelId) -> Result<()> {
+    for path in [id.path(), id.info_path()] {
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).with_context(|| format!("removing {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    if let Some(folder) = id.path().parent() {
+        fs::remove_dir(folder).ok();
+    }
+    Ok(())
 }
 
 /// The error a download returns when it was cancelled.
@@ -113,74 +217,264 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-/// Downloads a model into a staging folder, verifies every file, then moves the folder into
-/// place. `progress` gets the bytes done and the total as they arrive. Setting `cancel` stops
-/// the download with [`Cancelled`] and leaves the staging folder for the next attempt to
-/// overwrite. Blocks, so call it from a thread of its own.
-pub fn download(kind: Model, progress: &dyn Fn(u64, u64), cancel: &AtomicBool) -> Result<()> {
-    let target = dir(kind);
-    let staging = target.with_extension("partial");
-    fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
-    let total = download_size(kind);
-    let client = reqwest::blocking::Client::builder()
+fn client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("tokativ/", env!("CARGO_PKG_VERSION")))
         .timeout(None)
         .build()
-        .context("building the HTTP client")?;
+        .context("building the HTTP client")
+}
+
+/// Downloads a model into place, checked against the SHA-256 Hugging Face lists for the file.
+/// `progress` gets the bytes done and the total. Setting `cancel` stops it with [`Cancelled`].
+/// Blocks, so call it from a thread of its own.
+pub fn download(id: &ModelId, progress: &dyn Fn(u64, u64), cancel: &AtomicBool) -> Result<()> {
+    let client = client()?;
+    let remote = files(&client, &id.repo)?
+        .into_iter()
+        .find(|file| file.name == id.file)
+        .with_context(|| format!("{} has no file {}", id.repo, id.file))?;
+    let architecture = repository(&client, &id.repo)?
+        .architecture
+        .unwrap_or_default();
+
+    let path = id.path();
+    let folder = path.parent().context("model path has no parent")?;
+    fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
+    let partial = path.with_extension("gguf.partial");
+    let mut response = client
+        .get(id.url())
+        .send()
+        .and_then(|response| response.error_for_status())
+        .with_context(|| format!("requesting {}", id.url()))?;
+    let mut out = BufWriter::new(
+        File::create(&partial).with_context(|| format!("creating {}", partial.display()))?,
+    );
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 1 << 16];
     let mut done = 0;
-    progress(done, total);
-
-    for file in files(kind) {
-        let path = staging.join(file.name);
-        if fs::metadata(&path).is_ok_and(|meta| meta.len() == file.size)
-            && hash_file(&path)? == file.sha256
-        {
-            done += file.size;
-            progress(done, total);
-            continue;
+    progress(done, remote.size);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            drop(out);
+            fs::remove_file(&partial).ok();
+            return Err(Cancelled.into());
         }
-        let mut response = client
-            .get(file.url)
-            .send()
-            .and_then(|response| response.error_for_status())
-            .with_context(|| format!("requesting {}", file.url))?;
-        let mut out = BufWriter::new(
-            File::create(&path).with_context(|| format!("creating {}", path.display()))?,
-        );
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0; 1 << 16];
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(Cancelled.into());
-            }
-            let read = response
-                .read(&mut buffer)
-                .with_context(|| format!("reading {}", file.url))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-            out.write_all(&buffer[..read])
-                .with_context(|| format!("writing {}", path.display()))?;
-            done += read as u64;
-            progress(done, total);
+        let read = response
+            .read(&mut buffer)
+            .with_context(|| format!("reading {}", id.url()))?;
+        if read == 0 {
+            break;
         }
-        out.flush()?;
-        let hash = format!("{:x}", hasher.finalize());
-        if hash != file.sha256 {
-            fs::remove_file(&path).ok();
-            bail!("{} does not match its checksum", file.name);
-        }
+        hasher.update(&buffer[..read]);
+        out.write_all(&buffer[..read])
+            .with_context(|| format!("writing {}", partial.display()))?;
+        done += read as u64;
+        progress(done, remote.size);
     }
-
-    delete(kind)?;
-    fs::rename(&staging, &target)
-        .with_context(|| format!("moving {} into place", target.display()))?;
+    out.flush()?;
+    drop(out);
+    let hash = format!("{:x}", hasher.finalize());
+    if remote
+        .sha256
+        .as_deref()
+        .is_some_and(|expected| expected != hash)
+    {
+        fs::remove_file(&partial).ok();
+        bail!("{} does not match the checksum Hugging Face lists", id.file);
+    }
+    fs::rename(&partial, &path).with_context(|| format!("moving {} into place", path.display()))?;
+    let info = Info {
+        architecture,
+        sha256: hash,
+    };
+    fs::write(id.info_path(), serde_json::to_string_pretty(&info)?)
+        .with_context(|| format!("writing {}", id.info_path().display()))?;
     Ok(())
 }
 
-fn hash_file(path: &std::path::Path) -> Result<String> {
-    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+/// A repository found on the hub.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repository {
+    pub id: String,
+    pub architecture: Option<String>,
+    pub downloads: u64,
+    pub likes: u64,
+}
+
+/// A GGUF file in a repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteFile {
+    pub name: String,
+    pub size: u64,
+    pub sha256: Option<String>,
+}
+
+impl RemoteFile {
+    pub fn quantization(&self) -> Option<&str> {
+        quantization(&self.name)
+    }
+}
+
+#[derive(Deserialize)]
+struct HubModel {
+    id: String,
+    #[serde(default)]
+    downloads: u64,
+    #[serde(default)]
+    likes: u64,
+    gguf: Option<HubGguf>,
+}
+
+#[derive(Deserialize)]
+struct HubGguf {
+    architecture: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HubEntry {
+    path: String,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    size: u64,
+    lfs: Option<HubLfs>,
+}
+
+#[derive(Deserialize)]
+struct HubLfs {
+    oid: String,
+}
+
+impl From<HubModel> for Repository {
+    fn from(model: HubModel) -> Self {
+        Self {
+            id: model.id,
+            architecture: model.gguf.and_then(|gguf| gguf.architecture),
+            downloads: model.downloads,
+            likes: model.likes,
+        }
+    }
+}
+
+/// Speech recognition models in GGUF form matching `query`, most downloaded first, keeping only
+/// architectures the engine can run. Blocks.
+pub fn search(query: &str) -> Result<Vec<Repository>> {
+    let client = client()?;
+    let models: Vec<HubModel> = client
+        .get(format!("{HUB}/api/models"))
+        .query(&[
+            ("search", query),
+            ("filter", "gguf"),
+            ("pipeline_tag", "automatic-speech-recognition"),
+            ("sort", "downloads"),
+            ("limit", "40"),
+            ("expand[]", "gguf"),
+            ("expand[]", "downloads"),
+            ("expand[]", "likes"),
+        ])
+        .send()
+        .and_then(|response| response.error_for_status())
+        .context("searching Hugging Face")?
+        .json()
+        .context("reading the search results")?;
+    Ok(models
+        .into_iter()
+        .map(Repository::from)
+        .filter(|repository| {
+            repository
+                .architecture
+                .as_deref()
+                .is_some_and(|architecture| ARCHITECTURES.contains(&architecture))
+        })
+        .collect())
+}
+
+fn repository(client: &reqwest::blocking::Client, repo: &str) -> Result<Repository> {
+    let model: HubModel = client
+        .get(format!("{HUB}/api/models/{repo}"))
+        .query(&[
+            ("expand[]", "gguf"),
+            ("expand[]", "downloads"),
+            ("expand[]", "likes"),
+        ])
+        .send()
+        .and_then(|response| response.error_for_status())
+        .with_context(|| format!("looking up {repo}"))?
+        .json()
+        .with_context(|| format!("reading {repo}"))?;
+    Ok(model.into())
+}
+
+fn files(client: &reqwest::blocking::Client, repo: &str) -> Result<Vec<RemoteFile>> {
+    let entries: Vec<HubEntry> = client
+        .get(format!("{HUB}/api/models/{repo}/tree/main"))
+        .send()
+        .and_then(|response| response.error_for_status())
+        .with_context(|| format!("listing {repo}"))?
+        .json()
+        .with_context(|| format!("reading the files of {repo}"))?;
+    let mut files: Vec<RemoteFile> = entries
+        .into_iter()
+        .filter(|entry| entry.kind == "file" && entry.path.ends_with(".gguf"))
+        .map(|entry| RemoteFile {
+            name: entry.path,
+            size: entry.size,
+            sha256: entry.lfs.map(|lfs| lfs.oid),
+        })
+        .collect();
+    files.sort_by_key(|file| preference(file.quantization()));
+    Ok(files)
+}
+
+/// The GGUF files in a repository, the preferred quantization first. Blocks.
+pub fn repository_files(repo: &str) -> Result<Vec<RemoteFile>> {
+    files(&client()?, repo)
+}
+
+fn preference(quant: Option<&str>) -> usize {
+    quant
+        .and_then(|quant| QUANT_PREFERENCE.iter().position(|known| *known == quant))
+        .unwrap_or(QUANT_PREFERENCE.len())
+}
+
+/// The quantization a GGUF file name ends in, such as `Q8_0` or `F16`.
+fn quantization(file: &str) -> Option<&str> {
+    let stem = file.strip_suffix(".gguf")?;
+    let quant = stem.rsplit(['-', '.']).next()?;
+    let upper = quant.chars().next()?.is_ascii_uppercase();
+    (upper && quant.chars().any(|c| c.is_ascii_digit())).then_some(quant)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_and_names() {
+        let id =
+            ModelId::parse("handy-computer/whisper-small-gguf/whisper-small-Q5_K_M.gguf").unwrap();
+        assert_eq!(id.repo, "handy-computer/whisper-small-gguf");
+        assert_eq!(id.name(), "whisper-small Q5_K_M");
+        assert!(ModelId::parse("parakeet").is_none());
+        assert_eq!(
+            ModelId::parse(tokativ_config::DEFAULT_MODEL)
+                .unwrap()
+                .name(),
+            "Parakeet v3"
+        );
+    }
+
+    #[test]
+    fn preferred_quantization_comes_first() {
+        let mut files = ["x-F16.gguf", "x-Q4_K_M.gguf", "x-Q8_0.gguf"]
+            .map(|name| RemoteFile {
+                name: name.into(),
+                size: 0,
+                sha256: None,
+            })
+            .to_vec();
+        files.sort_by_key(|file| preference(file.quantization()));
+        assert_eq!(files[0].name, "x-Q8_0.gguf");
+    }
 }
