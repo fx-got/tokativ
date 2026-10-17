@@ -291,6 +291,7 @@ impl Daemon {
             },
             cx,
         );
+        tokativ_ui::updates::init(cx);
 
         // The pill waits folded from the start, so even the first session shows it at once. Other
         // systems cannot pass clicks through a waiting window, so they open the pill per session.
@@ -315,6 +316,8 @@ impl Daemon {
             Event::Tray(TrayEvent::Toggle) => self.toggle(cx),
             Event::Tray(TrayEvent::Model(model)) => self.set_model(model, cx),
             Event::Tray(TrayEvent::Settings) => self.open_settings(cx),
+            #[cfg(not(target_os = "linux"))]
+            Event::Tray(TrayEvent::Updates) => tokativ_ui::updates::open(cx),
             Event::Tray(TrayEvent::Quit) => self.quit(cx),
             Event::Recorder { session, event } => self.recorded(session, event, cx),
             Event::Transcribed { session, result } => self.transcribed(session, result, cx),
@@ -352,6 +355,7 @@ impl Daemon {
             Action::Confirm => self.confirm(cx),
             Action::Cancel => self.cancel(cx),
             Action::Settings => self.open_settings(cx),
+            Action::Updates => tokativ_ui::updates::open(cx),
             Action::Quit => self.quit(cx),
             #[cfg(not(target_os = "linux"))]
             Action::Capturing(capturing) => {
@@ -387,7 +391,7 @@ impl Daemon {
     /// Shows the pill at once and opens the microphone in the background, since a device can
     /// take a few hundred milliseconds to open. Speech before it opens is not heard.
     fn start(&mut self, cx: &mut Context<Self>) {
-        if self.session.is_some() {
+        if self.session.is_some() || tokativ_ui::updates::installing(cx) {
             return;
         }
         let config = self.store.read(cx).config().clone();

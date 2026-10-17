@@ -10,6 +10,7 @@ use super::{SIZE, Shown, TrayEvent, pixels};
 
 const TOGGLE: &str = "toggle";
 const SETTINGS: &str = "settings";
+const UPDATES: &str = "updates";
 const QUIT: &str = "quit";
 /// Model entries are this followed by the model's full name.
 const MODEL: &str = "model:";
@@ -31,6 +32,7 @@ impl Tray {
             let event = match id {
                 TOGGLE => TrayEvent::Toggle,
                 SETTINGS => TrayEvent::Settings,
+                UPDATES => TrayEvent::Updates,
                 QUIT => TrayEvent::Quit,
                 _ => match id.strip_prefix(MODEL) {
                     Some(model) => TrayEvent::Model(model.to_owned()),
@@ -103,6 +105,12 @@ fn menu(recording: bool, shown: &Shown) -> Result<Menu> {
     }
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&MenuItem::with_id(SETTINGS, "Settings", true, None))?;
+    menu.append(&MenuItem::with_id(
+        UPDATES,
+        "Check for updates…",
+        true,
+        None,
+    ))?;
     menu.append(&MenuItem::with_id(QUIT, "Quit", true, None))?;
     Ok(menu)
 }

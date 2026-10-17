@@ -46,7 +46,7 @@ launchd agent.
 The [latest release](https://github.com/nolight132/tokativ/releases/latest) has x86_64 and ARM64
 builds for all three platforms:
 
-- **Windows:** download the `.exe` for your architecture and run it.
+- **Windows:** run the `-setup.exe` installer for your architecture. A portable `.exe` is also available.
 - **macOS:** download the `.app.tar.gz` for Intel or Apple silicon, extract it, and move Tokativ
   to Applications. Open it from the context menu on first launch; builds are not notarized.
 - **Linux:** download the binary, make it executable, and put it on your `PATH` as `tokativ`.
@@ -75,6 +75,9 @@ and “эмодзи красное сердце” with ❤️. It is on by defa
 Unicode 17 emoji catalogue with names in 140+ languages, including flags and skin tones.
 Say “emoji” or its local equivalent (such as “эмодзи”, “絵文字” or “이모지”) before or after the name.
 Names without an emoji command remain ordinary text.
+
+Windows and macOS check for updates and show a popup when a new version is available. You can
+also check from the tray menu or **Settings → System**. Updates keep your settings and models.
 
 ## Build from source
 

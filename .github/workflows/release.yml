@@ -162,13 +162,18 @@ jobs:
       - name: build Unix
         if: runner.os != 'Windows'
         shell: bash
-        run: cargo build --release --locked --package tokativ --target ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --package tokativ --target ${{ matrix.target }}
+          cargo test --release --locked --package tokativ-updater --lib --target ${{ matrix.target }}
 
       # Git Bash prepends /usr/bin, where GNU link shadows MSVC's link.exe.
       - name: build Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --release --locked --package tokativ --target ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --package tokativ --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked --package tokativ-updater --lib --target ${{ matrix.target }}
 
       - name: stage and check Unix executable
         if: runner.os != 'Windows'
@@ -230,6 +235,37 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Executable exited with $($process.ExitCode)" }
           dumpbin /headers $executable
 
+      - name: build and check Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $innoInstaller = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $innoInstaller
+          $expected = '9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732'
+          if ((Get-FileHash $innoInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Inno Setup checksum mismatch' }
+          $compiler = Join-Path $env:RUNNER_TEMP 'InnoSetup'
+          $process = Start-Process $innoInstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$compiler") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
+          $packageVersion = (Select-String '^version = "([^"]+)"' Cargo.toml | Select-Object -First 1).Matches[0].Groups[1].Value
+          $numericVersion = ($packageVersion -split '[-+]')[0]
+          $binary = (Resolve-Path "target/$env:TARGET/release/tokativ.exe").Path
+          $output = (Resolve-Path dist).Path
+          & "$compiler\ISCC.exe" "/DAppVersion=$packageVersion" "/DVersionInfo=$numericVersion" "/DArtifactVersion=$env:VERSION" "/DTarget=$env:TARGET" "/DBinary=$binary" "/DInstallerOutput=$output" assets/windows/tokativ.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Compiling the installer failed' }
+          $setup = (Resolve-Path "dist/tokativ-$env:VERSION-$env:TARGET-setup.exe").Path
+          $installed = Join-Path $env:RUNNER_TEMP 'Tokativ-installed'
+          $process = Start-Process $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installed") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Tokativ installer failed: $($process.ExitCode)" }
+          $process = Start-Process "$installed\tokativ.exe" -ArgumentList '--version' -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode -ne 0) { throw 'The installed executable failed' }
+          $process = Start-Process "$installed\unins000.exe" -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Uninstalling the test installation failed' }
+          if (Test-Path "$installed\tokativ.exe") { throw 'Uninstall left the executable behind' }
+
       - uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
@@ -280,7 +316,7 @@ jobs:
             found { print }
           ' CHANGELOG.md > notes.md
           test -s notes.md
-          test "$(find dist -maxdepth 1 -name 'tokativ-*' ! -name '*licenses*' | wc -l)" -eq 6
+          test "$(find dist -maxdepth 1 -name 'tokativ-*' ! -name '*licenses*' | wc -l)" -eq 8
 
       - uses: softprops/action-gh-release@v2
         with:

@@ -16,6 +16,7 @@ pub mod settings;
 pub mod setup;
 mod spring;
 mod text_morph;
+pub mod updates;
 mod usage;
 
 use gpui::App;

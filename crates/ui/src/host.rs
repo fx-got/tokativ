@@ -19,6 +19,7 @@ pub enum Action {
     Confirm,
     Cancel,
     Settings,
+    Updates,
     Quit,
     /// A window is recording a new hotkey, so the current one has to let its presses through.
     Capturing(bool),

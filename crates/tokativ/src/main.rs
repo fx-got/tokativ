@@ -68,6 +68,9 @@ enum Verb {
     Settings,
     /// Stop the daemon
     Quit,
+    /// Apply a verified update after the parent daemon has exited
+    #[command(hide = true)]
+    ApplyUpdate { manifest: std::path::PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -88,6 +91,7 @@ fn main() -> ExitCode {
             with_models,
             step,
         }) => sandbox(keep, with_models, step),
+        Some(Verb::ApplyUpdate { manifest }) => tokativ_updater::apply(&manifest),
         Some(verb) => send(command(verb)),
     };
     match result {
@@ -101,7 +105,9 @@ fn main() -> ExitCode {
 
 fn command(verb: Verb) -> Command {
     match verb {
-        Verb::Daemon | Verb::Sandbox { .. } => unreachable!("handled in main"),
+        Verb::Daemon | Verb::Sandbox { .. } | Verb::ApplyUpdate { .. } => {
+            unreachable!("handled in main")
+        }
         Verb::Toggle => Command::Toggle,
         Verb::Start => Command::Start,
         Verb::Stop => Command::Stop,

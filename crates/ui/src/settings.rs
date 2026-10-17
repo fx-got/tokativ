@@ -520,40 +520,64 @@ impl Settings {
                     this.edit(cx, |config| config.models.unload_after_minutes = minutes);
                 }))
             }));
-        group(
-            None,
-            vec![
-                row(
-                    "Launch at login",
-                    "Not needed with the Home Manager service.",
-                    Switch::new("login", login)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |config| config.launch_at_login = !login);
-                        }))
-                        .into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
+        let mut rows = vec![
+            row(
+                "Launch at login",
+                "Not needed with the Home Manager service.",
+                Switch::new("login", login)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| config.launch_at_login = !login);
+                    }))
+                    .into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+            setting(
+                "Tray icon",
+                Switch::new("tray", tray)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| config.tray = !tray);
+                    }))
+                    .into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+            row(
+                "Unload models",
+                "Frees memory between sessions. The next one starts a moment later.",
+                idle_picker.into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+        ];
+        if cfg!(not(target_os = "linux")) {
+            let automatic = config.check_for_updates;
+            rows.push(
                 setting(
-                    "Tray icon",
-                    Switch::new("tray", tray)
+                    "Automatic update checks",
+                    Switch::new("automatic-updates", automatic)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |config| config.tray = !tray);
+                            this.edit(cx, |config| config.check_for_updates = !automatic)
                         }))
                         .into_any_element(),
                     cx,
                 )
                 .into_any_element(),
-                row(
-                    "Unload models",
-                    "Frees memory between sessions. The next one starts a moment later.",
-                    idle_picker.into_any_element(),
+            );
+            rows.push(
+                setting(
+                    "Updates",
+                    Button::new("check-updates")
+                        .label("Check for updates")
+                        .secondary()
+                        .on_click(|_, _, cx| Host::global(cx).dispatch(crate::Action::Updates, cx))
+                        .into_any_element(),
                     cx,
                 )
                 .into_any_element(),
-            ],
-            cx,
-        )
+            );
+        }
+        group(None, rows, cx)
     }
 
     /// The rules that rewrite each phrase before it is inserted.

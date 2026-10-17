@@ -22,6 +22,8 @@ pub enum TrayEvent {
     /// Switch to the installed model with this name, `owner/repository/file.gguf`.
     Model(String),
     Settings,
+    #[cfg(not(target_os = "linux"))]
+    Updates,
     Quit,
 }
 

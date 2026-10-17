@@ -131,6 +131,8 @@ pub struct Config {
     pub models: Models,
     pub launch_at_login: bool,
     pub tray: bool,
+    /// Check stable releases on Windows and macOS; package managers own updates on Linux.
+    pub check_for_updates: bool,
     /// The keys that start and confirm a session on macOS and Windows, which Tokativ registers
     /// itself, such as `alt+space`. On Linux the compositor binds a key to `tokativ toggle`
     /// instead and this is unused.
@@ -157,6 +159,7 @@ impl Default for Config {
             models: Models::default(),
             launch_at_login: false,
             tray: true,
+            check_for_updates: true,
             hotkey: DEFAULT_HOTKEY.to_owned(),
             live_preview: true,
             setup_done: false,

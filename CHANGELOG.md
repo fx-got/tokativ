@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Windows installers through Inno Setup for x86_64 and ARM64, with per-user installation,
+  shortcuts and an uninstaller. Portable executables remain available.
+- Update checks on Windows and macOS, with a popup offering a verified download and restart.
+  Checks can also be started from the tray or settings, and automatic checks can be disabled.
+  Notifications wait until dictation finishes. Installations managed by a package manager keep
+  their existing update method when they are not macOS app bundles.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added
