@@ -7236,6 +7236,8 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "raw-window-handle",
  "rustix 1.1.5",
+ "serde",
+ "serde_json",
  "tokativ-audio",
  "tokativ-config",
  "tokativ-engine",

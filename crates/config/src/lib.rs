@@ -127,6 +127,9 @@ pub struct Config {
     pub vocabulary: Vec<String>,
     pub vad: Vad,
     pub insertion: Insertion,
+    /// The color theme by id: `system`, one of the built-in themes such as `dark` or `ocean`, or
+    /// the file name of a custom theme in the themes folder without `.json`.
+    pub theme: String,
     pub pill: Pill,
     pub models: Models,
     pub launch_at_login: bool,
@@ -155,6 +158,7 @@ impl Default for Config {
             vocabulary: Vec::new(),
             vad: Vad::default(),
             insertion: Insertion::default(),
+            theme: "system".to_owned(),
             pill: Pill::default(),
             models: Models::default(),
             launch_at_login: false,
@@ -233,6 +237,10 @@ pub struct Pill {
     /// Show what is being said in a caption beside the pill, on the side away from the edge.
     /// On by default where no draft can show at the cursor, which is everywhere but Wayland.
     pub caption: bool,
+    /// Show the cross that cancels the session. Escape and `tokativ cancel` work either way.
+    pub cancel_button: bool,
+    /// Show the check mark that finishes the session. Enter and the hotkey work either way.
+    pub confirm_button: bool,
 }
 
 impl Default for Pill {
@@ -241,6 +249,8 @@ impl Default for Pill {
             edge: PillEdge::Bottom,
             margin: 48.,
             caption: !cfg!(target_os = "linux"),
+            cancel_button: true,
+            confirm_button: true,
         }
     }
 }

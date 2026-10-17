@@ -11,7 +11,7 @@ use gpui::{
     point, px, svg,
 };
 use tokativ_audio::{BANDS, Levels};
-use tokativ_config::PillEdge;
+use tokativ_config::Pill as PillConfig;
 use ui::ActiveTheme as _;
 
 use crate::overlay;
@@ -34,12 +34,11 @@ const BAR_WIDTH_PX: f32 = 3.;
 const BAR_GAP_PX: f32 = 4.;
 /// The space between each button and the nearest bar.
 const BAR_MARGIN_PX: f32 = 12.;
-/// Just wide enough for the two buttons and the bars between them.
-pub(crate) const WIDTH: Pixels = px(PADDING_PX * 2.
-    + (HEIGHT_PX - PADDING_PX * 2.) * 2.
-    + BAR_MARGIN_PX * 2.
-    + BAR_WIDTH_PX * BARS as f32
-    + BAR_GAP_PX * (BARS - 1) as f32);
+/// The diameter of a button, which fills the pill's height inside the padding.
+const BUTTON_PX: f32 = HEIGHT_PX - PADDING_PX * 2.;
+/// The bars and the room on either side of them.
+const BARS_SPAN_PX: f32 =
+    BAR_MARGIN_PX * 2. + BAR_WIDTH_PX * BARS as f32 + BAR_GAP_PX * (BARS - 1) as f32;
 /// The tallest a bar grows, as a share of the pill's height.
 const BAR_REACH: f32 = 0.62;
 /// How long the bars take to settle a change, as the time constant of their easing.
@@ -69,14 +68,22 @@ const CLOSE_LIMIT: Duration = Duration::from_millis(700);
 /// How small and how blurred the capsule is when folded.
 const FOLDED_SCALE: f32 = 0.82;
 const FOLDED_BLUR: Pixels = px(8.);
+/// Just wide enough for the buttons shown and the bars beside them.
+fn width(config: &PillConfig) -> Pixels {
+    let buttons = config.cancel_button as u8 + config.confirm_button as u8;
+    px(PADDING_PX * 2. + BUTTON_PX * buttons as f32 + BARS_SPAN_PX)
+}
+
 /// Where the pill takes clicks: the capsule at full width, not the room around it for the shadow.
-const REGION: Bounds<Pixels> = Bounds {
-    origin: point(SHADOW, SHADOW),
-    size: Size {
-        width: WIDTH,
-        height: HEIGHT,
-    },
-};
+fn region(width: Pixels) -> Bounds<Pixels> {
+    Bounds {
+        origin: point(SHADOW, SHADOW),
+        size: Size {
+            width,
+            height: HEIGHT,
+        },
+    }
+}
 
 /// What the session is doing, which is what the bars show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,30 +120,36 @@ pub struct Pill {
     /// width holds and the spring's bounce shows as scale, which moves by fractions of a pixel
     /// where the width can only step by whole ones.
     widened: bool,
+    /// The capsule's width once open.
+    width: Pixels,
+    cancel: bool,
+    confirm: bool,
 }
 
-/// Opens the pill on the focused output. `levels` feeds the bars, and the handlers run when
-/// the buttons are clicked. A `resting` pill starts folded away, ready to unfold at once.
+/// Opens the pill on the focused output where `config` places it, with the buttons it asks for.
+/// `levels` feeds the bars, and the handlers run when the buttons are clicked. A `resting` pill starts folded away, ready to unfold at once.
 pub fn open(
     levels: Levels,
-    edge: PillEdge,
-    margin: f32,
+    config: &PillConfig,
     on_confirm: impl Fn(&mut App) + 'static,
     on_cancel: impl Fn(&mut App) + 'static,
     resting: bool,
     cx: &mut App,
 ) -> anyhow::Result<WindowHandle<Pill>> {
-    let size = Size::new(WIDTH + SHADOW * 2., HEIGHT + SHADOW * 2.);
+    let width = width(config);
+    let (cancel, confirm) = (config.cancel_button, config.confirm_button);
+    let size = Size::new(width + SHADOW * 2., HEIGHT + SHADOW * 2.);
     // The shadow margin is part of the surface, so the visible gap to the edge takes it off.
-    let gap = px(margin) - SHADOW;
-    let options = overlay::options(edge, gap, size, None, cx);
+    let gap = px(config.margin) - SHADOW;
+    let options = overlay::options(config.edge, gap, size, None, cx);
     let on_confirm: Handler = Rc::new(on_confirm);
     let on_cancel: Handler = Rc::new(on_cancel);
     cx.open_window(options, move |window, cx| {
         overlay::prepare(window, false);
+        let region = [region(width)];
         window.set_input_region(Some(match resting {
             true => &[],
-            false => &[REGION],
+            false => &region,
         }));
         cx.new(|_| Pill {
             levels,
@@ -152,6 +165,9 @@ pub fn open(
             controls: Spring::new(POP),
             resting,
             widened: false,
+            width,
+            cancel,
+            confirm,
         })
     })
 }
@@ -179,7 +195,7 @@ impl Pill {
         let folded = self.closing.take().is_some() || self.resting;
         if self.resting {
             self.resting = false;
-            window.set_input_region(Some(&[REGION]));
+            window.set_input_region(Some(&[region(self.width)]));
         }
         self.levels = levels;
         self.phase = Phase::Listening;
@@ -328,7 +344,7 @@ impl Render for Pill {
             true => (1., 1. + (body - 1.) * OVERSHOOT_SCALE),
             false => (unfolded, FOLDED_SCALE + (1. - FOLDED_SCALE) * body),
         };
-        let width = ui::snapped(HEIGHT + (WIDTH - HEIGHT) * spread, window);
+        let width = ui::snapped(HEIGHT + (self.width - HEIGHT) * spread, window);
         let controls = self.controls.at().max(0.);
         let pop = (0.4 + 0.6 * controls).max(0.01);
         let control_opacity = controls.min(1.);
@@ -365,30 +381,34 @@ impl Render for Pill {
                 .when(unfolded < 1., |this| {
                     this.blur(FOLDED_BLUR * (1. - unfolded))
                 })
-                .child(
-                    circle("cancel", button, theme.secondary, theme.secondary_hover)
-                        .when(moving, |this| {
-                            this.opacity(control_opacity).layer_scale(pop)
-                        })
-                        .child(icon("icons/x.svg", theme.foreground))
-                        .on_click(move |_, _, cx| on_cancel(cx)),
-                )
-                .child(bars(shown, reveal, bar_color).flex_1().h_full())
-                .child(
-                    circle(
-                        "confirm",
-                        button,
-                        theme.foreground,
-                        theme.foreground.opacity(0.85),
+                .when(self.cancel, |this| {
+                    this.child(
+                        circle("cancel", button, theme.secondary, theme.secondary_hover)
+                            .when(moving, |this| {
+                                this.opacity(control_opacity).layer_scale(pop)
+                            })
+                            .child(icon("icons/x.svg", theme.foreground))
+                            .on_click(move |_, _, cx| on_cancel(cx)),
                     )
-                    .opacity(match listening {
-                        true => control_opacity,
-                        false => control_opacity * 0.5,
-                    })
-                    .when(moving, |this| this.layer_scale(pop))
-                    .child(icon("icons/check.svg", theme.background))
-                    .on_click(move |_, _, cx| on_confirm(cx)),
-                ),
+                })
+                .child(bars(shown, reveal, bar_color).flex_1().h_full())
+                .when(self.confirm, |this| {
+                    this.child(
+                        circle(
+                            "confirm",
+                            button,
+                            theme.foreground,
+                            theme.foreground.opacity(0.85),
+                        )
+                        .opacity(match listening {
+                            true => control_opacity,
+                            false => control_opacity * 0.5,
+                        })
+                        .when(moving, |this| this.layer_scale(pop))
+                        .child(icon("icons/check.svg", theme.background))
+                        .on_click(move |_, _, cx| on_confirm(cx)),
+                    )
+                }),
         )
     }
 }

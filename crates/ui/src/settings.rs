@@ -19,6 +19,7 @@ use ui::{
 use crate::chrome::{self, group, row, setting};
 use crate::host::{Files, Host, Library, ModelState, Status, Store};
 use crate::models;
+use crate::themes;
 use crate::usage::{Sampler, Usage};
 
 const WIDTH: f32 = 920.;
@@ -445,9 +446,75 @@ impl Settings {
         )
     }
 
+    fn appearance(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = config.theme.clone();
+        let known = themes::name(&current, cx);
+        let pick = |id: String, label: String, cx: &mut Context<Self>| {
+            MenuItem::new(SharedString::from(format!("theme-{id}")), label)
+                .selected(id == current)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let id = id.clone();
+                    this.edit(cx, |config| config.theme = id);
+                }))
+        };
+        let mut items: Vec<MenuItem> = themes::BUILT_IN
+            .into_iter()
+            .map(|kind| pick(kind.id().to_owned(), kind.label().to_string(), cx))
+            .collect();
+        let custom = themes::custom(cx).to_vec();
+        if !custom.is_empty() {
+            items.push(MenuItem::separator("themes-custom"));
+            items.extend(
+                custom
+                    .into_iter()
+                    .map(|theme| pick(theme.id, theme.name, cx)),
+            );
+        }
+        // A theme file that was removed or broke stays selected until another is picked.
+        let shown = known.unwrap_or_else(|| {
+            let missing = format!("{current} (unavailable)");
+            items.push(
+                MenuItem::new("theme-unavailable", missing.clone())
+                    .selected(true)
+                    .disabled(),
+            );
+            missing
+        });
+        let picker = Picker::new("theme", &self.popovers, shown)
+            .width(Picker::REGULAR)
+            .items(items);
+        let folder = Button::new("open-themes")
+            .label("Open folder")
+            .small()
+            .outline()
+            .on_click(|_, _, cx| {
+                let folder = themes::folder();
+                if let Err(error) = std::fs::create_dir_all(&folder) {
+                    log::error!("themes: cannot create {}: {error}", folder.display());
+                }
+                cx.open_with_system(&folder);
+            });
+        group(
+            Some("Appearance"),
+            vec![
+                setting("Theme", picker.into_any_element(), cx).into_any_element(),
+                row(
+                    "Custom themes",
+                    "JSON files in the themes folder, in the format Sonora reads. A saved file shows up in the list right away.",
+                    folder.into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            ],
+            cx,
+        )
+    }
+
     fn pill(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
         let edge = config.pill.edge;
         let caption = config.pill.caption;
+        let cancel_button = config.pill.cancel_button;
+        let confirm_button = config.pill.confirm_button;
         let picker = Picker::new("edge", &self.popovers, edge.name())
             .width(Picker::NARROW)
             .items(PillEdge::ALL.into_iter().map(|choice| {
@@ -488,6 +555,28 @@ impl Settings {
                     Switch::new("caption", caption)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.edit(cx, |config| config.pill.caption = !caption);
+                        }))
+                        .into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+                row(
+                    "Cancel button",
+                    "The cross on the left. Escape cancels without it.",
+                    Switch::new("cancel-button", cancel_button)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.pill.cancel_button = !cancel_button);
+                        }))
+                        .into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+                row(
+                    "Confirm button",
+                    "The check mark on the right. Enter or the hotkey finishes without it.",
+                    Switch::new("confirm-button", confirm_button)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.pill.confirm_button = !confirm_button);
                         }))
                         .into_any_element(),
                     cx,
@@ -1185,6 +1274,7 @@ impl Settings {
             ],
             Page::Style => vec![self.style(config, cx).into_any_element()],
             Page::General => vec![
+                self.appearance(config, cx).into_any_element(),
                 self.pill(config, cx).into_any_element(),
                 self.system(config, cx).into_any_element(),
                 self.resources(cx).into_any_element(),

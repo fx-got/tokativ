@@ -76,6 +76,10 @@ Unicode 17 emoji catalogue with names in 140+ languages, including flags and ski
 Say “emoji” or its local equivalent (such as “эмодзи”, “絵文字” or “이모지”) before or after the name.
 Names without an emoji command remain ordinary text.
 
+**Settings → General → Theme** follows the system or stays dark or light. Custom themes are JSON
+files in the themes folder that the settings open, in the same format as Sonora's, so a Sonora
+theme works as it is. The same page can hide the pill's cancel and confirm buttons.
+
 Windows and macOS check for updates and show a popup when a new version is available. You can
 also check from the tray menu or **Settings → General**. Updates keep your settings and models.
 

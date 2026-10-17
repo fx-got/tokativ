@@ -47,6 +47,8 @@ enum Event {
     },
     Key(Key),
     ConfigFile,
+    /// A file in the themes folder changed.
+    ThemesFolder,
 }
 
 /// The pill window and where it was put, which decides whether the next session can reuse it.
@@ -162,7 +164,7 @@ pub fn run(config: Config) -> Result<()> {
         if let Err(error) = Assets::load_fonts(cx) {
             log::error!("cannot load the UI fonts: {error:#}");
         }
-        tokativ_ui::refresh_theme(cx);
+        tokativ_ui::themes::init(&config.theme, cx);
         cx.bind_keys(bindings());
 
         let daemon = match Daemon::new(config, events, cx) {
@@ -218,8 +220,8 @@ impl Daemon {
         .detach();
 
         let watched = events.clone();
-        let watcher = watch_config(move || {
-            watched.unbounded_send(Event::ConfigFile).ok();
+        let watcher = watch_config(move |event| {
+            watched.unbounded_send(event).ok();
         })
         .map_err(|error| log::warn!("config: not watching for edits: {error:#}"))
         .ok();
@@ -332,6 +334,7 @@ impl Daemon {
                 Ok(config) => self.store.update(cx, |store, cx| store.replace(config, cx)),
                 Err(error) => log::warn!("config: keeping the running settings: {error:#}"),
             },
+            Event::ThemesFolder => tokativ_ui::themes::reload(cx),
         }
     }
 
@@ -541,8 +544,7 @@ impl Daemon {
         let cancel = confirm.clone();
         let opened = tokativ_ui::pill::open(
             levels,
-            config.pill.edge,
-            config.pill.margin,
+            &config.pill,
             move |cx| {
                 confirm.update(cx, |daemon, cx| daemon.confirm(cx)).ok();
             },
@@ -892,6 +894,9 @@ impl Daemon {
         {
             inserter.set_terminals(config.insertion.terminals.clone());
         }
+        if old.theme != config.theme {
+            tokativ_ui::themes::select(&config.theme, cx);
+        }
         if old.tray != config.tray {
             self.place_tray(config.tray, cx);
         }
@@ -1047,25 +1052,39 @@ fn idle_limit(config: &Config) -> Option<Duration> {
     }
 }
 
-/// Watches the config folder and calls `changed` whenever the config file is written. The
-/// folder is watched rather than the file, since saving replaces the file.
-fn watch_config(changed: impl Fn() + Send + 'static) -> Result<notify::RecommendedWatcher> {
+/// Watches the config folder and the themes folder inside it, and calls `changed` with
+/// [`Event::ConfigFile`] whenever the config file is written and with [`Event::ThemesFolder`]
+/// whenever a theme file is added, written or removed. The folders are watched rather than the
+/// files, since saving replaces a file.
+fn watch_config(changed: impl Fn(Event) + Send + 'static) -> Result<notify::RecommendedWatcher> {
     let directory = config_dir();
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("creating {}", directory.display()))?;
+    let themes = tokativ_ui::themes::folder();
+    std::fs::create_dir_all(&themes).with_context(|| format!("creating {}", themes.display()))?;
     let path = config_path();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else {
             return;
         };
-        let touched = event.paths.iter().any(|touched| touched == &path);
-        if touched && (event.kind.is_create() || event.kind.is_modify()) {
-            changed();
+        if event.kind.is_access() {
+            return;
+        }
+        let config = event.paths.iter().any(|touched| touched == &path);
+        if config && (event.kind.is_create() || event.kind.is_modify()) {
+            changed(Event::ConfigFile);
+        }
+        let theme = event.paths.iter().any(|touched| {
+            touched.parent() == Some(themes.as_path())
+                && touched
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+        });
+        if theme {
+            changed(Event::ThemesFolder);
         }
     })
     .context("starting the config watcher")?;
     watcher
-        .watch(&directory, RecursiveMode::NonRecursive)
+        .watch(&directory, RecursiveMode::Recursive)
         .with_context(|| format!("watching {}", directory.display()))?;
     Ok(watcher)
 }
