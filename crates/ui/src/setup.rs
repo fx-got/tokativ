@@ -326,6 +326,7 @@ impl Setup {
                 });
                 div()
                     .rounded(chrome::GROUP_RADIUS)
+                    .squircle()
                     .border_1()
                     .border_color(match picked {
                         true => cx.theme().foreground.opacity(0.5),
@@ -577,6 +578,7 @@ fn check(icon: &str, status: String, ready: bool, cx: &App) -> impl IntoElement 
         .px(chrome::GROUP_PADDING)
         .py_3()
         .rounded(chrome::GROUP_RADIUS)
+        .squircle()
         .border_1()
         .border_color(match ready {
             true => theme.foreground.opacity(0.5),
@@ -637,6 +639,7 @@ fn progress(step: Step, from: Option<Step>, moves: u32, cx: &App) -> impl IntoEl
         .gap_3()
         .p(chrome::GROUP_PADDING)
         .rounded(chrome::GROUP_RADIUS)
+        .squircle()
         .bg(theme.secondary.opacity(0.45))
         .border_1()
         .border_color(theme.border.opacity(0.6))

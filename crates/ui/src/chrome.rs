@@ -94,6 +94,7 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
         .text_color(theme.foreground)
         .bg(theme.background)
         .rounded(radius)
+        .squircle()
         .overflow_hidden()
         // Middle-button auto-scrolling, wired the way Sonora's root wires it: any press ends the
         // mode, a held middle drag ends on release, Escape ends it, and the pointer steers it.
@@ -161,6 +162,7 @@ pub fn group(label: Option<&str>, rows: Vec<AnyElement>, cx: &App) -> impl IntoE
                 .flex()
                 .flex_col()
                 .rounded(GROUP_RADIUS)
+                .squircle()
                 .bg(theme.secondary.opacity(0.45))
                 .border_1()
                 .border_color(theme.border.opacity(0.6))
@@ -260,6 +262,7 @@ pub fn code(text: &str, cx: &App) -> impl IntoElement {
         .px(GROUP_PADDING)
         .py_3()
         .rounded(GROUP_RADIUS)
+        .squircle()
         .bg(theme.secondary.opacity(0.45))
         .border_1()
         .border_color(theme.border.opacity(0.6))

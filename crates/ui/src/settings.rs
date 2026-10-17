@@ -1155,6 +1155,7 @@ impl Settings {
                 .h(theme.metrics.control)
                 .px_3()
                 .rounded(theme.radius)
+                .squircle()
                 .cursor_pointer()
                 .text_color(match selected {
                     true => theme.foreground,
@@ -1293,6 +1294,7 @@ fn listed(list: AnyElement, cx: &App) -> AnyElement {
         .min_h_0()
         .p_1()
         .rounded(chrome::GROUP_RADIUS)
+        .squircle()
         .bg(theme.secondary.opacity(0.45))
         .border_1()
         .border_color(theme.border.opacity(0.6))

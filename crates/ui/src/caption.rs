@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    Bounds, Context, DisplayId, Hsla, PathBuilder, Pixels, ScrollHandle, Size, SpringConfig,
-    Window, WindowHandle, canvas, div, point, px, size,
+    Context, DisplayId, Hsla, Pixels, ScrollHandle, Size, SpringConfig, Window, WindowHandle, div,
+    point, px,
 };
 use tokativ_config::PillEdge;
 use ui::ActiveTheme as _;
@@ -15,7 +15,6 @@ use ui::ActiveTheme as _;
 use crate::overlay;
 use crate::pill;
 use crate::spring::Spring;
-use crate::squircle;
 use crate::text_morph::{LINE_HEIGHT, Morph, TextViewport, align};
 
 /// The caption's width, wider than the pill so a phrase has room.
@@ -311,46 +310,17 @@ impl Render for Caption {
         let (scroll, translation) = scroll_position(px(self.scroll.at()), window.scale_factor());
         self.scroll_handle.set_offset(point(px(0.), -scroll));
 
-        let width = px(self.width.at()).max(PADDING_X * 2. + BORDER * 2.);
-        let height = px(self.height.at()).max(PADDING_Y * 2. + BORDER * 2.);
-        let (fill, outline) = (theme.background, theme.border);
-        // The card is a squircle painted behind the text. The element keeps a plain rounded
-        // outline of the same radius for its shadow and its clip, and the squircle stays inside
-        // it.
-        let surface = canvas(
-            |_, _, _| {},
-            move |bounds, _, window, _| {
-                if let Some(path) = squircle::path(bounds, RADIUS, PathBuilder::fill()) {
-                    window.paint_path(path, fill);
-                }
-                // A stroke is centred on its path, so the path runs half a stroke inside.
-                let half = BORDER / 2.;
-                let inner = Bounds::new(
-                    point(bounds.origin.x + half, bounds.origin.y + half),
-                    size(bounds.size.width - BORDER, bounds.size.height - BORDER),
-                );
-                let stroke = PathBuilder::stroke(BORDER);
-                if let Some(path) = squircle::path(inner, RADIUS - half, stroke) {
-                    window.paint_path(path, outline);
-                }
-            },
-        )
-        .absolute()
-        .top(-BORDER)
-        .left(-BORDER)
-        .w(width)
-        .h(height);
-
         let bubble = div()
-            .w(width)
-            .h(height)
+            .w(px(self.width.at()).max(PADDING_X * 2. + BORDER * 2.))
+            .h(px(self.height.at()).max(PADDING_Y * 2. + BORDER * 2.))
             .flex_none()
             .px(PADDING_X)
             .py(PADDING_Y)
             .rounded(RADIUS)
-            // Transparent, to keep the text where the border's width puts it.
+            .squircle()
+            .bg(theme.background)
             .border_1()
-            .border_color(gpui::transparent_black())
+            .border_color(theme.border)
             .shadow_lg()
             .overflow_hidden()
             .when(unfolding, |this| {
@@ -366,7 +336,6 @@ impl Render for Caption {
                     .layer_translate(point(px(0.), towards_pill * (1. - shown)))
             })
             .when(shown < 1., |this| this.blur(FOLDED_BLUR * (1. - shown)))
-            .child(surface)
             .child(
                 // Scroll before painting/clipping, so incoming lines are rendered throughout
                 // the motion. A composited translation would only move already visible pixels.
