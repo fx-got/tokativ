@@ -261,8 +261,17 @@ impl Worker {
         self.pump(Duration::ZERO)
     }
 
+    /// Sends `text` to the focused window, which is looked up afresh each time. X11 apps never
+    /// activate the input method and misread typed keys, so they always get the paste.
     fn insert(&mut self, text: &str, preedit: &str) -> Result<()> {
-        if let Some(input_method) = self.active_input_method()? {
+        let window = focus::focused_window();
+        let x11 = window.as_ref().is_some_and(|window| window.x11);
+        let terminal = window
+            .and_then(|window| window.app_id)
+            .is_some_and(|app| self.terminals.contains(&app));
+        if x11 {
+            log::debug!("insert: {} bytes into an X11 window", text.len());
+        } else if let Some(input_method) = self.active_input_method()? {
             log::debug!("insert: {} bytes through the input method", text.len());
             for chunk in chunks(text, MAX_STRING) {
                 input_method.commit_string(chunk.into());
@@ -272,12 +281,15 @@ impl Worker {
             }
             input_method.commit(self.state.serial);
             return self.pump(Duration::ZERO);
+        } else {
+            log::debug!("insert: {} bytes, no active input method", text.len());
         }
-        log::debug!("insert: {} bytes, no active input method", text.len());
-        match (self.method, self.keyboards.is_some()) {
-            (Method::Clipboard, true) => self.ungrabbed(|worker| worker.paste(text)),
-            (_, true) => self.ungrabbed(|worker| worker.type_text(text)),
-            (_, false) => {
+        match (self.method, x11, self.keyboards.is_some()) {
+            (Method::Clipboard, _, true) | (_, true, true) => {
+                self.ungrabbed(|worker| worker.paste(text, terminal))
+            }
+            (_, false, true) => self.ungrabbed(|worker| worker.type_text(text)),
+            (_, _, false) => {
                 clipboard::offer(text)?;
                 log::warn!("insert: no way to send keys, the text is on the clipboard");
                 Ok(())
@@ -376,10 +388,9 @@ impl Worker {
         Ok(())
     }
 
-    /// Offers `text` on the clipboard, sends the paste chord, and restores the clipboard.
-    fn paste(&mut self, text: &str) -> Result<()> {
-        let terminal = focus::focused_app_id()
-            .is_some_and(|app| self.terminals.iter().any(|known| known == &app));
+    /// Offers `text` on the clipboard, sends the paste chord, and restores the clipboard. A
+    /// `terminal` gets Ctrl+Shift+V instead of Ctrl+V.
+    fn paste(&mut self, text: &str, terminal: bool) -> Result<()> {
         let previous = clipboard::save();
         clipboard::offer(text)?;
         let keyboard = self.virtual_keyboard()?;

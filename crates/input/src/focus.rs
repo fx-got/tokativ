@@ -1,17 +1,47 @@
-//! What niri has focused: the app, so the paste chord can follow terminal conventions, and the
-//! output, so the pill appears where the user is looking.
+//! What niri has focused: the window, so insertion can pick a way the app reads and the paste
+//! chord can follow terminal conventions, and the output, so the pill appears where the user is
+//! looking.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+/// The window niri has focused, as far as insertion cares.
+pub(crate) struct Window {
+    pub app_id: Option<String>,
+    /// Whether the window belongs to an X11 app behind Xwayland. Such apps read keys with the
+    /// seat's own keymap and ignore the one a virtual keyboard uploads.
+    pub x11: bool,
+}
+
+/// niri's focused window, or `None` off niri or when nothing has focus.
+pub(crate) fn focused_window() -> Option<Window> {
+    let reply = niri("\"FocusedWindow\"")?;
+    let window = reply.pointer("/Ok/FocusedWindow")?;
+    if window.is_null() {
+        return None;
+    }
+    let app_id = window
+        .get("app_id")
+        .and_then(|id| id.as_str())
+        .map(str::to_owned);
+    let x11 = window
+        .get("pid")
+        .and_then(|pid| pid.as_u64())
+        .is_some_and(xwayland);
+    Some(Window { app_id, x11 })
+}
+
 /// The app id of niri's focused window, or `None` off niri or when nothing has focus.
 pub fn focused_app_id() -> Option<String> {
-    let reply = niri("\"FocusedWindow\"")?;
-    reply
-        .pointer("/Ok/FocusedWindow/app_id")?
-        .as_str()
-        .map(str::to_owned)
+    focused_window()?.app_id
+}
+
+/// Whether `pid` is Xwayland or xwayland-satellite, the process niri reports for every X11
+/// window.
+fn xwayland(pid: u64) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .is_ok_and(|name| name.to_lowercase().contains("xwayland"))
 }
 
 /// The first running input method daemon that would already hold the seat's input method, by
