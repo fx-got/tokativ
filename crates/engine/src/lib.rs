@@ -2,6 +2,7 @@
 //! transcribe.cpp, on the graphics card through Vulkan when there is one.
 
 mod emoji;
+mod language;
 pub mod models;
 mod text;
 
@@ -74,6 +75,9 @@ pub struct Gguf {
     vocabulary: bool,
     prompt: bool,
     prefix: bool,
+    whisper: bool,
+    /// The language the model last heard, as it reported it.
+    heard: Option<String>,
 }
 
 impl Gguf {
@@ -103,6 +107,8 @@ impl Gguf {
             vocabulary: model.supports(Feature::Vocabulary),
             prompt: model.supports(Feature::ContextPrompt),
             prefix: model.supports(Feature::TranscriptPrefix),
+            whisper: model.arch() == "whisper",
+            heard: None,
             model,
             session,
         };
@@ -117,59 +123,102 @@ impl Gguf {
     }
 }
 
+/// The run options for one try at a phrase, and the language of the text before the phrase when
+/// that text went in.
+struct Prompted {
+    options: RunOptions,
+    before: Option<&'static str>,
+}
+
 impl Gguf {
-    /// The run options carrying as much of `context` as this model takes. The text before the
-    /// phrase goes in as a context prompt where the model has one, and otherwise as a transcript
-    /// to continue. `None` when nothing of the context applies.
-    fn options(&self, context: &Context) -> Option<RunOptions> {
+    /// The run options carrying as much of `context` as this model takes, or `None` when nothing
+    /// of it applies. Whisper gets the vocabulary as plain words in its prompt, since the
+    /// `Glossary:` line transcribe.cpp writes for it makes short phrases come out as that word
+    /// or in English. The text before the phrase goes in as a context prompt, or as a transcript
+    /// to continue, only with `with_before` and only when it is in the language last heard,
+    /// because Whisper translates speech into the language of its prompt.
+    fn prompted(&self, context: &Context, with_before: bool) -> Option<Prompted> {
+        let terms: Vec<String> = context
+            .vocabulary
+            .iter()
+            .map(|term| term.trim())
+            .filter(|term| !term.is_empty())
+            .map(str::to_owned)
+            .collect();
         let mut options = RunOptions::default();
-        if self.vocabulary {
-            options.vocabulary = context
-                .vocabulary
-                .iter()
-                .map(|term| term.trim())
-                .filter(|term| !term.is_empty())
-                .map(str::to_owned)
-                .collect();
-        }
-        let before = tail(&context.before, BEFORE_CHARS);
-        if !before.is_empty() {
-            match (self.prompt, self.prefix) {
-                (true, _) => options.prompt = Some(before.to_owned()),
-                (false, true) => options.prefix = Some(before.to_owned()),
-                (false, false) => {}
+        let mut prompt = String::new();
+        if self.vocabulary && !terms.is_empty() {
+            match self.whisper {
+                true => prompt = format!("{}.", terms.join(", ")),
+                false => options.vocabulary = terms,
             }
+        }
+        let text = tail(&context.before, BEFORE_CHARS);
+        let language = language::of_text(text)
+            .filter(|language| self.heard.as_deref().is_none_or(|heard| heard == *language));
+        let before = language.filter(|_| with_before && (self.prompt || self.prefix));
+        if before.is_some() {
+            match self.prompt {
+                true => {
+                    if !prompt.is_empty() {
+                        prompt.push(' ');
+                    }
+                    prompt.push_str(text);
+                }
+                false => options.prefix = Some(text.to_owned()),
+            }
+        }
+        if !prompt.is_empty() {
+            options.prompt = Some(prompt);
         }
         let used =
             !options.vocabulary.is_empty() || options.prompt.is_some() || options.prefix.is_some();
-        used.then_some(options)
+        used.then_some(Prompted { options, before })
+    }
+
+    /// Runs the model once, remembering the language it heard.
+    fn run(&mut self, samples: &[f32], options: &RunOptions) -> Result<transcribe_cpp::Transcript> {
+        let transcript = self
+            .session
+            .run(samples, options)
+            .map_err(|error| anyhow!("transcribing: {error}"))?;
+        if let Some(language) = &transcript.language {
+            self.heard = Some(language.clone());
+        }
+        Ok(transcript)
     }
 }
 
 impl Engine for Gguf {
     fn transcribe(&mut self, samples: &[f32], context: &Context) -> Result<String> {
-        let plain = RunOptions::default();
-        if let Some(options) = self.options(context) {
-            match self.session.run(samples, &options) {
-                // Whisper repeats the start of its vocabulary prompt when it cannot make out
-                // the audio, so that phrase is heard again without the prompt.
-                Ok(transcript)
-                    if !options.vocabulary.is_empty() && echoes_glossary(&transcript.text) =>
-                {
-                    log::debug!(
-                        "engine: {:?} echoes the vocabulary, retrying without it",
-                        transcript.text
-                    );
-                }
-                Ok(transcript) => return Ok(transcript.text),
+        let mut with_before = true;
+        while let Some(prompted) = self.prompted(context, with_before) {
+            let transcript = match self.run(samples, &prompted.options) {
+                Ok(transcript) => transcript,
                 // The context is a help, so a model that rejects it still transcribes.
-                Err(error) => log::warn!("engine: transcribing without the context: {error}"),
+                Err(error) => {
+                    log::warn!("engine: transcribing without the context: {error:#}");
+                    break;
+                }
+            };
+            if let (Some(before), Some(heard)) = (prompted.before, transcript.language.as_deref())
+                && before != heard
+            {
+                log::debug!("engine: heard {heard} after text in {before}, retrying without it");
+                with_before = false;
+                continue;
             }
+            if echoes_prompt(&transcript.text, &context.vocabulary) {
+                log::debug!(
+                    "engine: {:?} repeats the prompt, retrying without it",
+                    transcript.text
+                );
+                break;
+            }
+            return Ok(transcript.text);
         }
-        self.session
-            .run(samples, &plain)
+        self.run(samples, &RunOptions::default())
             .map(|transcript| transcript.text)
-            .map_err(|error| anyhow!("transcribing: {error}"))
     }
 
     fn abilities(&self) -> Abilities {
@@ -434,12 +483,21 @@ pub fn route_native_logs() {
     transcribe_cpp::init_logging();
 }
 
-/// Whether `text` starts with the word transcribe.cpp opens Whisper's vocabulary prompt with,
-/// `Glossary:`, which means the model repeated its prompt instead of transcribing.
-fn echoes_glossary(text: &str) -> bool {
-    text.split(|character: char| !character.is_alphanumeric())
-        .find(|word| !word.is_empty())
-        .is_some_and(|first| first.eq_ignore_ascii_case("glossary"))
+/// Whether `text` is the model repeating its prompt instead of transcribing: a phrase opening
+/// with `Glossary`, the word transcribe.cpp starts vocabulary prompts with, or nothing but the
+/// whole vocabulary of two or more terms in order.
+fn echoes_prompt(text: &str, vocabulary: &[String]) -> bool {
+    let words = |text: &str| -> Vec<String> {
+        text.split(|character: char| !character.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let said = words(text);
+    if said.first().is_some_and(|first| first == "glossary") {
+        return true;
+    }
+    vocabulary.len() >= 2 && !said.is_empty() && said == words(&vocabulary.join(" "))
 }
 
 /// The end of `text`, at most `limit` characters, starting at a word so the model never sees a
@@ -474,11 +532,14 @@ mod tests {
 
     #[test]
     fn a_repeated_prompt_is_caught() {
-        assert!(echoes_glossary("Glossary"));
-        assert!(echoes_glossary(" glossary: Sonora, Tokativ."));
-        assert!(echoes_glossary("Glossary. The meeting moved."));
-        assert!(!echoes_glossary("Sonora is out"));
-        assert!(!echoes_glossary("Glossaries are long"));
-        assert!(!echoes_glossary(""));
+        let terms = ["Sonora".to_owned(), "Tokativ".to_owned()];
+        assert!(echoes_prompt("Glossary", &terms));
+        assert!(echoes_prompt(" glossary: Sonora, Tokativ.", &terms));
+        assert!(echoes_prompt("Sonora, Tokativ", &terms));
+        assert!(!echoes_prompt("Sonora is out", &terms));
+        assert!(!echoes_prompt("Tokativ", &terms));
+        assert!(!echoes_prompt("Tokativ", &terms[1..]));
+        assert!(!echoes_prompt("Glossaries are long", &terms));
+        assert!(!echoes_prompt("", &terms));
     }
 }

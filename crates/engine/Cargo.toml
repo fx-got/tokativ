@@ -12,6 +12,7 @@ serde_json.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 regex.workspace = true
+whatlang.workspace = true
 tokativ-config.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
