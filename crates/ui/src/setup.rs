@@ -4,8 +4,8 @@
 use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, App, Context, Entity, Global, ScrollHandle,
-    SharedString, Size, Task, Window, WindowHandle, div, px, relative, svg,
+    Animation, AnimationExt as _, App, Context, Entity, Global, ScrollHandle, SharedString, Size,
+    Task, Window, WindowHandle, div, px, relative, svg,
 };
 use std::time::Instant;
 

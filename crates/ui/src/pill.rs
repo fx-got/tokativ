@@ -209,6 +209,8 @@ pub fn open(
     cx.open_window(options, move |window, cx| {
         #[cfg(windows)]
         never_activate(window);
+        #[cfg(target_os = "macos")]
+        frameless(window);
         window.set_input_region(Some(match resting {
             true => &[],
             false => &[REGION],
@@ -275,6 +277,31 @@ fn placement(
         PillEdge::Top => area.origin.y + gap,
     };
     (WindowKind::PopUp, point(x, y))
+}
+
+/// Strips the frame macOS draws around a title-less GPUI window: the rounded border and the
+/// system shadow, which would box the pill in. The pill draws its own shadow. The window stays a
+/// non-activating panel, so it still never takes focus.
+#[cfg(target_os = "macos")]
+fn frameless(window: &Window) {
+    use objc2_app_kit::{NSView, NSWindowStyleMask};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // GPUI's own `window_handle` names the window inside GPUI, not the platform window.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: the pointer is the content view of a window this thread just created and still
+    // owns, so it is a live NSView on the main thread.
+    let view: &NSView = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let Some(native) = view.window() else {
+        return;
+    };
+    native.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    native.setHasShadow(false);
 }
 
 /// Keeps a click on the pill from making it the foreground window, which would take focus from
