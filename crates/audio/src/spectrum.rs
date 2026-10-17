@@ -68,6 +68,13 @@ impl Levels {
         f32::from_bits(self.loudness.load(Ordering::Relaxed))
     }
 
+    /// Puts `bands` on show as they are, without any analysis. For previews of the pill.
+    pub fn show(&self, bands: [f32; BANDS]) {
+        for (index, value) in bands.into_iter().enumerate() {
+            self.set(index, value);
+        }
+    }
+
     pub(crate) fn clear(&self) {
         for band in self.bands.iter() {
             band.store(0f32.to_bits(), Ordering::Relaxed);
