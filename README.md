@@ -18,7 +18,7 @@ speak.
 </div>
 
 > [!NOTE]
-> Tokativ is an AI-driven project. The goal is a usable product that keeps getting better.
+> The project is vibe-coded as hell.
 
 Speech is recognized on your machine, on the CPU, with
 [Parakeet v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (25 European languages) or
