@@ -1,12 +1,12 @@
 //! Cached text shapes with spring motion between matching grapheme clusters. Painting applies
 //! color and opacity directly to glyphs, without a blur/compositing pass for each word.
 
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, sync::OnceLock, time::Duration};
 
 use gpui::prelude::*;
 use gpui::{
-    Bounds, Hsla, Pixels, ScrollHandle, SharedString, Size, SpringConfig, TextAlign, TextRun,
-    Window, WrappedLine, canvas, font, point, px,
+    App, Bounds, Hsla, Pixels, Point, ScrollHandle, SharedString, Size, SpringConfig, Style,
+    TextAlign, TextRun, Window, WrappedLine, canvas, font, point, px,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -18,6 +18,7 @@ const RISE: f32 = 5.;
 const MOVE: SpringConfig = SpringConfig::new(440., 38., 1.);
 const FADE: SpringConfig = SpringConfig::new(520., 46., 1.);
 const ALIGNMENT_LIMIT: usize = 16_384;
+static EMOJI_FONT: OnceLock<Option<&'static str>> = OnceLock::new();
 
 struct Glyph {
     text: SharedString,
@@ -232,44 +233,20 @@ impl Morph {
                         let alpha =
                             alpha * row_visibility(bounds.origin.y + row + translation, viewport);
                         if alpha > 0. {
-                            let _ = line.paint_tinted(
-                                origin,
-                                LINE_HEIGHT,
-                                TextAlign::Left,
-                                None,
-                                color.opacity(alpha),
-                                window,
-                                cx,
-                            );
+                            paint_line(&line, origin, color.opacity(alpha), window, cx);
                         }
                     }
                 } else if let Some(line) = line {
                     if line.wrap_boundaries().is_empty() {
                         let alpha = row_visibility(bounds.origin.y + translation, viewport);
                         if alpha > 0. {
-                            let _ = line.paint_tinted(
-                                bounds.origin,
-                                LINE_HEIGHT,
-                                TextAlign::Left,
-                                None,
-                                color.opacity(alpha),
-                                window,
-                                cx,
-                            );
+                            paint_line(&line, bounds.origin, color.opacity(alpha), window, cx);
                         }
                     } else {
                         window.with_content_mask(
                             Some(gpui::ContentMask { bounds: viewport }),
                             |window| {
-                                let _ = line.paint_tinted(
-                                    bounds.origin,
-                                    LINE_HEIGHT,
-                                    TextAlign::Left,
-                                    None,
-                                    color,
-                                    window,
-                                    cx,
-                                );
+                                paint_line(&line, bounds.origin, color, window, cx);
                             },
                         );
                     }
@@ -282,24 +259,108 @@ impl Morph {
     }
 }
 
-fn shape(text: SharedString, limit: Option<Pixels>, window: &Window) -> Rc<WrappedLine> {
-    let run = TextRun {
-        len: text.len(),
-        font: font("Inter"),
-        color: gpui::white(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
+/// GPUI's tinted paint deliberately skips color emoji. Keep its text rendering and paint
+/// those glyphs separately, preserving their colors and applying the same animated opacity.
+fn paint_line(
+    line: &WrappedLine,
+    origin: Point<Pixels>,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let _ = line.paint_tinted(
+        origin,
+        LINE_HEIGHT,
+        TextAlign::Left,
+        None,
+        color,
+        window,
+        cx,
+    );
+    let baseline = (LINE_HEIGHT - line.ascent() - line.descent()) / 2. + line.ascent();
+    let opacity = Style {
+        opacity: Some(color.a),
+        ..Style::default()
     };
+    opacity.paint(
+        Bounds::new(origin, line.size(LINE_HEIGHT)),
+        window,
+        cx,
+        |window, _| {
+            for run in &line.unwrapped_layout.runs {
+                for glyph in run.glyphs.iter().filter(|glyph| glyph.is_emoji) {
+                    let position = glyph_position(line, glyph.index)
+                        + point(
+                            glyph.position.x - line.unwrapped_layout.x_for_index(glyph.index),
+                            baseline + glyph.position.y,
+                        );
+                    let _ = window.paint_emoji(origin + position, run.font_id, glyph.id, FONT_SIZE);
+                }
+            }
+        },
+    );
+}
+
+fn shape(text: SharedString, limit: Option<Pixels>, window: &Window) -> Rc<WrappedLine> {
+    // Explicit emoji presentation must also override a monochrome glyph in the text font
+    // (for example, Inter's heart). Use an installed color font for the complete cluster.
+    let emoji_font = text
+        .contains('\u{fe0f}')
+        .then(|| {
+            *EMOJI_FONT.get_or_init(|| {
+                let names = window.text_system().all_font_names();
+                [
+                    "Apple Color Emoji",
+                    "Segoe UI Emoji",
+                    "Noto Color Emoji",
+                    "Twemoji Mozilla",
+                ]
+                .into_iter()
+                .find(|candidate| {
+                    names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(candidate))
+                })
+            })
+        })
+        .flatten();
+    let runs = text_runs(&text, emoji_font);
     Rc::new(
         window
             .text_system()
-            .shape_text(text, FONT_SIZE, &[run], limit, None)
+            .shape_text(text, FONT_SIZE, &runs, limit, None)
             .expect("caption text must shape")
             .into_iter()
             .next()
             .expect("a word has a line"),
     )
+}
+
+fn text_runs(text: &str, emoji_font: Option<&'static str>) -> Vec<TextRun> {
+    let mut runs: Vec<TextRun> = Vec::new();
+    for grapheme in text.graphemes(true) {
+        let family = if grapheme.contains('\u{fe0f}') {
+            emoji_font.unwrap_or("Inter")
+        } else {
+            "Inter"
+        };
+        if let Some(last) = runs
+            .last_mut()
+            .filter(|run| run.font.family.as_ref() == family)
+        {
+            last.len += grapheme.len();
+        } else {
+            runs.push(TextRun {
+                len: grapheme.len(),
+                font: font(family),
+                color: gpui::white(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+    }
+    runs
 }
 
 fn glyph_position(line: &WrappedLine, byte: usize) -> gpui::Point<Pixels> {
@@ -381,6 +442,33 @@ pub(crate) fn align(previous: &[&str], next: &[&str]) -> Vec<Option<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_presentation_uses_the_color_font_without_tinting_punctuation_or_letters() {
+        let runs = text_runs("Привет ❤️, 👩‍❤️‍👨!", Some("Noto Color Emoji"));
+        let mut start = 0;
+        let fragments: Vec<_> = runs
+            .iter()
+            .map(|run| {
+                let text = &"Привет ❤️, 👩‍❤️‍👨!"[start..start + run.len];
+                start += run.len;
+                (text, run.font.family.as_ref())
+            })
+            .collect();
+        assert_eq!(
+            fragments,
+            vec![
+                ("Привет ", "Inter"),
+                ("❤️", "Noto Color Emoji"),
+                (", ", "Inter"),
+                ("👩‍❤️‍👨", "Noto Color Emoji"),
+                ("!", "Inter")
+            ]
+        );
+        let fallback = text_runs("Привет ❤️!", None);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].len, "Привет ❤️!".len());
+    }
 
     #[test]
     fn punctuation_does_not_restart_existing_letters_or_their_velocity() {
