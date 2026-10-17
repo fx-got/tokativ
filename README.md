@@ -1,163 +1,75 @@
+<div align="center">
+
 # Tokativ
 
-Dictation for Linux on Wayland that runs entirely on your machine. Press a key, talk, and the text
-lands in the focused app phrase by phrase while you speak. A pill at the bottom of the screen shows
-your voice and has buttons to cancel or finish.
+Local dictation for Wayland. Press a key, talk, and the text is typed into the focused app as you
+speak.
 
-You pick one speech model and dictate in whatever it understands. Both run on the CPU through
-ONNX Runtime:
+[![License](https://img.shields.io/badge/license-GPL--3.0-2b2b33?style=flat-square)](COPYING)
+[![Rust](https://img.shields.io/badge/rust-1.98-2b2b33?style=flat-square&logo=rust)](rust-toolchain.toml)
+[![Wayland](https://img.shields.io/badge/wayland-%E2%99%A1-2b2b33?style=flat-square&logo=wayland)](#use)
+[![Nix](https://img.shields.io/badge/nix-flake-2b2b33?style=flat-square&logo=nixos)](#nix)
+[![Platforms](https://img.shields.io/badge/linux-x86__64%20%7C%20aarch64-2b2b33?style=flat-square&logo=linux&logoColor=white)](#install)
 
-| Model | Export | Languages |
-| --- | --- | --- |
-| Parakeet v3 (NVIDIA) | parakeet-tdt-0.6b-v3, int8 | 25 European languages including English and Russian, told apart per phrase |
-| GigaAM v3 (Sber) | v3 e2e CTC, int8 | Russian, with punctuation |
+<img src="docs/preview.png" alt="The Tokativ pill while dictating" width="900">
+<br>
+<br>
 
-Tokativ targets niri. Any compositor with `wlr-layer-shell` and the input method or virtual
-keyboard protocols should work. GNOME and X11 are not supported.
+</div>
+
+> [!NOTE]
+> Tokativ is an AI-driven project. The goal is a usable product that keeps getting better.
+
+Speech is recognized on your machine, on the CPU, with
+[Parakeet v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (25 European languages) or
+[GigaAM v3](https://github.com/salute-developers/GigaAM) (Russian).
 
 ## Install
 
-With flakes and Home Manager:
+### Nix
 
-```nix
-{
-  inputs.tokativ.url = "github:nolight132/tokativ";
-
-  # in your Home Manager configuration
-  imports = [ inputs.tokativ.homeModules.default ];
-  services.tokativ = {
-    enable = true;
-    # optional: fetch models at build time instead of from the setup window
-    prefetchModels = [ "parakeet" "gigaam" ];
-  };
-}
-```
-
-The module installs the package and runs `tokativ daemon` as a systemd user service tied to
-`graphical-session.target`. Without Home Manager, `nix run github:nolight132/tokativ` starts the
-daemon. Any CLI command that opens something starts it too if it is not running yet.
-
-On first run a setup window downloads the model you pick (about 670 MB for Parakeet, 225 MB for
-GigaAM) into `$XDG_DATA_HOME/tokativ/models`, lets you pick a microphone, and gives you a field
-to try dictating into.
-
-## Hotkey
-
-Bind the toggle in your niri config:
-
-```kdl
-binds {
-    Mod+D { spawn "tokativ" "toggle"; }
-}
-```
-
-The first press opens the pill and starts listening. While you speak, a draft of the current
-phrase shows at the cursor as underlined text. Each time you pause for about half a second, the
-phrase is transcribed in full and inserted. The second press, Enter, or the check mark on the pill
-inserts whatever is left and closes it. Escape or the cross drop anything not yet inserted. Text
-that has already gone in stays.
-
-Escape and Enter work because the session takes the keyboard through the input method protocol.
-Every other key is passed on to the focused app, so typing by hand mid-session behaves normally.
-Drafts and the two keys need the input method, so they are off when another input method such as
-fcitx5 is running.
-
-## Commands
-
-```
-tokativ                 run the daemon (same as `tokativ daemon`)
-tokativ toggle          start, or finish the running session
-tokativ start | stop    start, or finish
-tokativ confirm         finish and insert the rest
-tokativ cancel          drop what is not inserted and close the pill
-tokativ model <id>      switch to parakeet or gigaam
-tokativ settings        open the settings window
-tokativ quit            stop the daemon
-```
-
-The daemon listens on `$XDG_RUNTIME_DIR/tokativ.sock`. Each connection sends one command as a line
-of text and gets back `ok` or `error: <reason>`.
-
-## How text gets in
-
-The daemon picks the first of these that works at startup, and the settings window shows which one
-it chose and why:
-
-1. **Input method** (`zwp_input_method_v2`). Text is committed as a string, so any script works,
-   and a `…` placeholder sits at the cursor while a phrase is transcribed. Only one input method
-   can hold the seat. If fcitx5, IBus or kime is running, Tokativ leaves it alone and moves down
-   the list. On niri 26.04, binding a second input method detaches the first, so the check happens
-   before binding.
-2. **Virtual keyboard** (`zwp_virtual_keyboard_v1`). Text is typed wtype-style with a keymap built
-   for exactly the characters needed. This is also used for any app that has no text-input-v3
-   support, since the input method never activates there.
-3. **Clipboard and paste**. The text goes on the clipboard, Ctrl+V is sent (Ctrl+Shift+V in the
-   terminals listed in the config), and the previous clipboard text is put back.
-
-## Configuration
-
-Settings live in `$XDG_CONFIG_HOME/tokativ/config.toml`. The settings window writes the file and
-the daemon reloads it whenever it changes, whoever wrote it. Every key is optional:
-
-```toml
-# input_device = "..."          # a device id picked in settings, omit for the default
-model = "parakeet"              # or "gigaam"
-launch_at_login = false         # writes an XDG autostart entry
-tray = true
-live_preview = true            # draft text at the cursor while speaking
-
-[vad]
-silence_ms = 500                # the pause that ends a phrase
-threshold = 0.5                 # Silero speech probability
-max_segment_s = 20              # phrases are cut here even mid-speech
-preroll_ms = 200                # audio kept from before speech starts
-
-[insertion]
-backend = "auto"                # "input-method", "virtual-keyboard" or "clipboard"
-terminals = ["foot", "kitty", "Alacritty", "com.mitchellh.ghostty"]
-
-[pill]
-edge = "bottom"                 # or "top"
-margin = 48
-
-[models]
-unload_after_minutes = 0        # 0 keeps models loaded
-```
-
-## Building
+Run it once:
 
 ```sh
-nix develop
-cargo run -- daemon
-cargo test --workspace
-cargo clippy --workspace --all-targets
+nix run github:nolight132/tokativ
 ```
 
-`ort` is pinned to `2.0.0-rc.12` and linked against the onnxruntime from nixpkgs through
-`ORT_LIB_LOCATION`, which the dev shell sets. To work on the first-run flow, `cargo run -- sandbox` starts a
-throwaway daemon in `~/.local/state/tokativ/sandbox` with its own config, models and socket, fresh
-each time. `--with-models` links the models you already have instead of downloading them, and
-`--keep` picks up where the last run left off. `--step microphone` (or `models`, `try`, `hotkey`)
-opens the setup window on that step. Commands reach it with
-`TOKATIV_SANDBOX=~/.local/state/tokativ/sandbox tokativ toggle`. To try the whole pipeline without speaking, point
-`TOKATIV_INPUT_FILE` at a 16-bit mono WAV file. The daemon plays it in place of the microphone.
-`cargo run -p tokativ-engine --example file -- parakeet speech.wav` runs a 16 kHz file through the
-VAD and an engine and prints each phrase.
+Or install it with Home Manager, which also runs it as a user service:
 
-The workspace is split by job:
+```nix
+# flake inputs
+tokativ.url = "github:nolight132/tokativ";
 
-- `tokativ-audio` captures audio, computes the bar levels and resamples to 16 kHz. Silero VAD v6
-  cuts the speech into phrases.
-- `tokativ-engine` holds the `Engine` trait, Parakeet and GigaAM through transcribe-rs, the worker
-  thread, model downloads and how phrases are joined.
-- `tokativ-input` inserts text over Wayland.
-- `tokativ-ui` has the pill, settings and setup windows, drawn with Sonora's `ui` crate on
-  Sonora's GPUI fork.
-- `tokativ-config` holds the config file and paths shared by all of them.
-- `tokativ` is the binary: daemon, socket, CLI and tray.
+# Home Manager configuration
+imports = [ inputs.tokativ.homeModules.default ];
+services.tokativ.enable = true;
+```
 
-## Licenses
+### From source
 
-Tokativ is GPL-3.0-or-later, since it builds on Sonora's UI crate. Inter is under the SIL Open Font
-License and the Silero VAD model under MIT. The speech models are downloaded from their authors'
-releases under their own licenses: CC-BY-4.0 for Parakeet and MIT for GigaAM.
+You need Rust 1.98, onnxruntime 1.24 or newer, pkg-config, cmake, and the development files for
+wayland, libxkbcommon, vulkan-loader, fontconfig, alsa-lib and openssl.
+
+```sh
+git clone https://github.com/nolight132/tokativ
+cd tokativ
+export ORT_LIB_LOCATION=/usr/lib    # the folder that holds libonnxruntime.so
+export ORT_PREFER_DYNAMIC_LINK=1
+cargo build --release
+./target/release/tokativ
+```
+
+## Use
+
+The first start opens a setup window that downloads a model and shows the keybinding line for
+your compositor. Bind `tokativ toggle` to a key: the first press starts dictating, the second
+inserts the rest. While dictating, Enter finishes and Escape cancels.
+
+Tokativ runs on compositors with layer shell: niri, Hyprland, Sway, river and KDE Plasma. GNOME
+is not supported.
+
+`cargo run -- sandbox` runs a separate copy as a new user would see it, to work on the setup flow.
+
+## License
+
+GPL-3.0-or-later.
