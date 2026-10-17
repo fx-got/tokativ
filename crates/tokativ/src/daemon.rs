@@ -82,6 +82,8 @@ struct Session {
     stopping: bool,
     /// The hotkey was pressed again while finishing, so a new session follows in the same pill.
     restart: bool,
+    /// Speech was heard, so confirming has something to wait for.
+    heard: bool,
 }
 
 pub struct Daemon {
@@ -328,6 +330,7 @@ impl Daemon {
             capturing: true,
             stopping: false,
             restart: false,
+            heard: false,
         });
         self.publish(cx);
 
@@ -463,6 +466,17 @@ impl Daemon {
         if session.stopping {
             return;
         }
+        // Nothing was said, so there is nothing to wait for: close at once rather than waiting
+        // for the microphone to open or flush an empty buffer.
+        if !session.heard && session.pending == 0 {
+            let mut session = self.session.take().expect("session checked above");
+            if let Some(recorder) = session.recorder.take() {
+                recorder.cancel();
+            }
+            log::info!("session {}: confirmed with nothing said", session.id);
+            self.close(session, true, cx);
+            return;
+        }
         session.stopping = true;
         if let Some(recorder) = session.recorder.take() {
             recorder.stop();
@@ -490,7 +504,10 @@ impl Daemon {
             return;
         };
         match event {
-            tokativ_audio::Event::Started => log::debug!("session {id}: speech"),
+            tokativ_audio::Event::Started => {
+                session.heard = true;
+                log::debug!("session {id}: speech");
+            }
             tokativ_audio::Event::Segment(segment) => {
                 session.pending += 1;
                 let index = session.spoken;
