@@ -33,8 +33,8 @@ let
   sonora = fetchFromGitHub {
     owner = "sonorahq";
     repo = "sonora";
-    rev = "2a68b53b9c375f85928238b35db824eeedb414ed";
-    hash = "sha256-lY/Py0lVdSzl9vU6glHTHf6uZHFpiwbH+B9jb9ADDYE=";
+    rev = "71b58c809d51f62f4a5de521cdc09707df549139";
+    hash = "sha256-8jWpPWevJ0ZNF5fNRYvLwI8eUMkgv7iGuiuUj8VsFOo=";
   };
   alsaPlugins = symlinkJoin {
     name = "tokativ-alsa-plugins";

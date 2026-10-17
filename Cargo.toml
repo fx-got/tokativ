@@ -35,13 +35,13 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wl-clipboard-rs = "0.9"
 futures = "0.3"
 hound = "3.5"
-gpui = { git = "https://github.com/sonorahq/gpui", rev = "439295d5c1e21682a704b93a6ade6a7d5a585ccd" }
-gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "439295d5c1e21682a704b93a6ade6a7d5a585ccd", features = [
+gpui = { git = "https://github.com/sonorahq/gpui", rev = "b5b49cc0dfdfd5c0f7c921c3d8bbd42cf3cae8d1" }
+gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "b5b49cc0dfdfd5c0f7c921c3d8bbd42cf3cae8d1", features = [
   "font-kit",
   "wayland",
 ] }
-icons = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
-ui = { git = "https://github.com/sonorahq/sonora", rev = "2a68b53b" }
+icons = { git = "https://github.com/sonorahq/sonora", rev = "71b58c80" }
+ui = { git = "https://github.com/sonorahq/sonora", rev = "71b58c80" }
 regex = "1.12"
 whatlang = "0.18"
 unicode-segmentation = "1.13"
