@@ -69,6 +69,10 @@ as F5 works on its own, any other key needs a modifier. macOS asks for Accessibi
 first time Tokativ types, and the text only arrives once it is allowed. Neither system lets another
 app put a draft at the cursor, so the text appears once each phrase is done.
 
+On every platform, **Settings → Pill → Live caption** adds a larger floating window with the
+current draft and the latest dictated text. It sits below a top pill or above a bottom pill,
+and lets clicks through to the app underneath. It is on by default on macOS and Windows.
+
 ## License
 
 GPL-3.0-or-later.

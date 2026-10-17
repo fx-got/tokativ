@@ -449,6 +449,7 @@ impl Settings {
 
     fn pill(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
         let edge = config.pill.edge;
+        let caption = config.pill.caption;
         let picker = Picker::new("edge", &self.popovers, edge.name())
             .width(Picker::NARROW)
             .items(PillEdge::ALL.into_iter().map(|choice| {
@@ -480,6 +481,17 @@ impl Settings {
                         |config, fraction| config.pill.margin = value(fraction, MARGIN).round(),
                         cx,
                     ),
+                    cx,
+                )
+                .into_any_element(),
+                row(
+                    "Live caption",
+                    "A floating text window below the top pill or above the bottom pill.",
+                    Switch::new("caption", caption)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.pill.caption = !caption);
+                        }))
+                        .into_any_element(),
                     cx,
                 )
                 .into_any_element(),

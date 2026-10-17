@@ -5,22 +5,21 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
-use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Hsla, Pixels, Point, Size, SpringConfig, SpringState, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div,
+    App, Bounds, Context, Hsla, Pixels, Size, SpringConfig, Window, WindowHandle, canvas, div,
     point, px, svg,
 };
 use tokativ_audio::{BANDS, Levels};
-use tokativ_config::{APP_ID, PillEdge};
+use tokativ_config::PillEdge;
 use ui::ActiveTheme as _;
 
+use crate::overlay;
 use crate::radius::nested_radius;
+use crate::spring::Spring;
 
 const HEIGHT_PX: f32 = 44.;
-const HEIGHT: Pixels = px(HEIGHT_PX);
+pub(crate) const HEIGHT: Pixels = px(HEIGHT_PX);
 /// The gap between the pill's edge and its buttons, the same on every side a button touches.
 const PADDING_PX: f32 = 6.;
 const PADDING: Pixels = px(PADDING_PX);
@@ -28,14 +27,14 @@ const PADDING: Pixels = px(PADDING_PX);
 /// from the outer edge.
 const BORDER: Pixels = px(1.);
 /// Room around the pill for its shadow. Clicks there fall through to whatever is below.
-const SHADOW: Pixels = px(14.);
+pub(crate) const SHADOW: Pixels = px(14.);
 const BARS: usize = BANDS;
 const BAR_WIDTH_PX: f32 = 3.;
 const BAR_GAP_PX: f32 = 4.;
 /// The space between each button and the nearest bar.
 const BAR_MARGIN_PX: f32 = 12.;
 /// Just wide enough for the two buttons and the bars between them.
-const WIDTH: Pixels = px(PADDING_PX * 2.
+pub(crate) const WIDTH: Pixels = px(PADDING_PX * 2.
     + (HEIGHT_PX - PADDING_PX * 2.) * 2.
     + BAR_MARGIN_PX * 2.
     + BAR_WIDTH_PX * BARS as f32
@@ -61,9 +60,6 @@ const BARS_STAGGER: Duration = Duration::from_millis(24);
 const BAR_REVEAL: Duration = Duration::from_millis(200);
 /// How fast the bars go out when the pill closes, before the capsule folds.
 const BARS_FADE: Duration = Duration::from_millis(90);
-/// How close to its target, and how slow, a spring must be to count as at rest. Fine enough that
-/// landing on the exact target moves nothing by a visible fraction of a pixel.
-const REST: f32 = 0.001;
 /// How much of the spring's overshoot past full width shows as growth in scale, once the
 /// capsule has reached its full width.
 const OVERSHOOT_SCALE: f32 = 0.5;
@@ -118,53 +114,6 @@ pub struct Pill {
     widened: bool,
 }
 
-/// One animated value driven by a spring towards its target.
-struct Spring {
-    config: SpringConfig,
-    state: SpringState,
-    target: f32,
-}
-
-impl Spring {
-    fn new(config: SpringConfig) -> Self {
-        Self {
-            config,
-            state: SpringState {
-                position: 0.,
-                velocity: 0.,
-            },
-            target: 0.,
-        }
-    }
-
-    fn aim(&mut self, target: f32, config: SpringConfig) {
-        self.target = target;
-        self.config = config;
-    }
-
-    /// Moves the value on by `elapsed`. Once it has come to rest it lands exactly on the target,
-    /// since a value left a hair off would keep the pill on fractional pixels for good.
-    fn step(&mut self, elapsed: Duration) {
-        self.state = self
-            .config
-            .step(self.state, self.target, elapsed.as_secs_f32());
-        if self.settled() {
-            self.state = SpringState {
-                position: self.target,
-                velocity: 0.,
-            };
-        }
-    }
-
-    fn at(&self) -> f32 {
-        self.state.position
-    }
-
-    fn settled(&self) -> bool {
-        self.config.is_settled(self.state, self.target, REST)
-    }
-}
-
 /// Opens the pill on the focused output. `levels` feeds the bars, and the handlers run when
 /// the buttons are clicked. A `resting` pill starts folded away, ready to unfold at once.
 pub fn open(
@@ -179,38 +128,11 @@ pub fn open(
     let size = Size::new(WIDTH + SHADOW * 2., HEIGHT + SHADOW * 2.);
     // The shadow margin is part of the surface, so the visible gap to the edge takes it off.
     let gap = (px(margin) - SHADOW).max(Pixels::ZERO);
-    let (kind, origin) = placement(edge, gap, size, cx);
+    let options = overlay::options(edge, gap, size, None, cx);
     let on_confirm: Handler = Rc::new(on_confirm);
     let on_cancel: Handler = Rc::new(on_cancel);
-    #[allow(
-        unused_mut,
-        reason = "only the floating window off Linux changes the options"
-    )]
-    let mut options = WindowOptions {
-        titlebar: None,
-        window_bounds: Some(WindowBounds::Windowed(Bounds { origin, size })),
-        app_id: Some(APP_ID.into()),
-        window_background: WindowBackgroundAppearance::Transparent,
-        // The pill never has focus, and without this its bars would drop to the throttled
-        // frame rate GPUI gives inactive windows.
-        inactive_frame_interval: None,
-        kind,
-        ..Default::default()
-    };
-    // A layer surface never takes focus. A floating window has to be told, or showing it would
-    // pull focus from the app being dictated into.
-    #[cfg(not(target_os = "linux"))]
-    {
-        options.focus = false;
-        options.is_movable = false;
-        options.is_resizable = false;
-        options.is_minimizable = false;
-    }
     cx.open_window(options, move |window, cx| {
-        #[cfg(windows)]
-        never_activate(window);
-        #[cfg(target_os = "macos")]
-        frameless(window);
+        overlay::prepare(window, false);
         window.set_input_region(Some(match resting {
             true => &[],
             false => &[REGION],
@@ -231,101 +153,6 @@ pub fn open(
             widened: false,
         })
     })
-}
-
-/// Where the pill goes: a layer surface anchored to the focused output's edge. `gap` is the
-/// distance from that edge to the window.
-#[cfg(target_os = "linux")]
-fn placement(
-    edge: PillEdge,
-    gap: Pixels,
-    _size: Size<Pixels>,
-    _cx: &App,
-) -> (WindowKind, Point<Pixels>) {
-    let (anchor, margin) = match edge {
-        PillEdge::Bottom => (Anchor::BOTTOM, (px(0.), px(0.), gap, px(0.))),
-        PillEdge::Top => (Anchor::TOP, (gap, px(0.), px(0.), px(0.))),
-    };
-    let kind = WindowKind::LayerShell(LayerShellOptions {
-        namespace: APP_ID.into(),
-        layer: Layer::Overlay,
-        anchor,
-        exclusive_zone: Some(px(0.)),
-        margin: Some(margin),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        ..Default::default()
-    });
-    (kind, point(px(0.), px(0.)))
-}
-
-/// Where the pill goes: a floating window centred on the primary display's edge, inside the
-/// area the dock or taskbar leaves free.
-#[cfg(not(target_os = "linux"))]
-fn placement(
-    edge: PillEdge,
-    gap: Pixels,
-    size: Size<Pixels>,
-    cx: &App,
-) -> (WindowKind, Point<Pixels>) {
-    let area = cx
-        .primary_display()
-        .map(|display| display.visible_bounds())
-        .unwrap_or_default();
-    let x = area.origin.x + (area.size.width - size.width) / 2.;
-    let y = match edge {
-        PillEdge::Bottom => area.origin.y + area.size.height - size.height - gap,
-        PillEdge::Top => area.origin.y + gap,
-    };
-    (WindowKind::PopUp, point(x, y))
-}
-
-/// Strips the frame macOS draws around a title-less GPUI window: the rounded border and the
-/// system shadow, which would box the pill in. The pill draws its own shadow. The window stays a
-/// non-activating panel, so it still never takes focus.
-#[cfg(target_os = "macos")]
-fn frameless(window: &Window) {
-    use objc2_app_kit::{NSView, NSWindowStyleMask};
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    // GPUI's own `window_handle` names the window inside GPUI, not the platform window.
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
-    };
-    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return;
-    };
-    // SAFETY: the pointer is the content view of a window this thread just created and still
-    // owns, so it is a live NSView on the main thread.
-    let view: &NSView = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
-    let Some(native) = view.window() else {
-        return;
-    };
-    native.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
-    native.setHasShadow(false);
-}
-
-/// Keeps a click on the pill from making it the foreground window, which would take focus from
-/// the app being dictated into. GPUI's pop-up windows can still be activated on Windows.
-#[cfg(windows)]
-fn never_activate(window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
-    };
-
-    // GPUI's own `window_handle` names the window inside GPUI, not the platform window.
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
-    };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return;
-    };
-    let window = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-    // SAFETY: the handle belongs to a window this thread just created and still owns.
-    unsafe {
-        let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
-        SetWindowLongPtrW(window, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
-    }
 }
 
 impl Pill {
@@ -393,8 +220,8 @@ impl Pill {
             }
         }
         if still {
-            self.body.state.position = self.body.target;
-            self.controls.state.position = self.controls.target;
+            self.body.finish();
+            self.controls.finish();
         } else {
             self.body.step(elapsed);
             self.controls.step(elapsed);

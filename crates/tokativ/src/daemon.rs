@@ -12,7 +12,7 @@ use tokativ_audio::{Levels, Options, Recorder, Silero, SpeechDetector, Timing};
 use tokativ_config::{Capitals, Config, config_dir, config_path, socket_path};
 use tokativ_engine::{Joiner, ModelId, Transcriber, restyle};
 use tokativ_input::{Inserter, Key, Method};
-use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
+use tokativ_ui::{Action, Caption, Host, Library, Phase, Pill, Status, Store};
 
 use crate::assets::Assets;
 use crate::autostart;
@@ -93,6 +93,8 @@ struct Session {
     surrounding: Option<String>,
     /// The text this session has inserted so far.
     written: String,
+    /// Drafts show at the cursor as well as in the caption.
+    at_cursor: bool,
 }
 
 impl Session {
@@ -128,6 +130,8 @@ pub struct Daemon {
     /// The pill window, kept while it is on screen so a new session can unfold it again
     /// instead of opening another.
     pill: Option<Placed>,
+    /// The caption beside the pill, while the session has words to show in it.
+    caption: Option<WindowHandle<Caption>>,
     tray: Option<Tray>,
     tray_events: UnboundedSender<TrayEvent>,
     /// The toggle hotkey and, during a session, Escape and Enter. Linux leaves the toggle to the
@@ -235,6 +239,7 @@ impl Daemon {
                 session: None,
                 next_session: 0,
                 pill: None,
+                caption: None,
                 tray: None,
                 tray_events,
                 #[cfg(not(target_os = "linux"))]
@@ -317,7 +322,7 @@ impl Daemon {
                 session,
                 segment,
                 result,
-            } => self.drafted(session, segment, result),
+            } => self.drafted(session, segment, result, cx),
             Event::Key(Key::Escape) => self.cancel(cx),
             Event::Key(Key::Enter) => self.confirm(cx),
             Event::ConfigFile => match Config::load() {
@@ -422,15 +427,21 @@ impl Daemon {
             heard: false,
             surrounding: None,
             written: String::new(),
+            at_cursor: false,
         });
         self.publish(cx);
 
-        // Drafts show as preedit text, which only the input method can put at the cursor.
-        let drafts = config.live_preview
+        // Drafts show as preedit text, which only the input method can put at the cursor, and in
+        // the caption.
+        let at_cursor = config.live_preview
             && self
                 .inserter
                 .as_ref()
                 .is_some_and(|inserter| inserter.status().method == Method::InputMethod);
+        if let Some(session) = &mut self.session {
+            session.at_cursor = at_cursor;
+        }
+        let drafts = at_cursor || config.pill.caption;
         let options = Options {
             device: config.input_device.clone(),
             timing: Timing {
@@ -614,8 +625,12 @@ impl Daemon {
                 );
                 // The last draft of this segment stays up until its final text replaces it.
                 let drafted = matches!(&session.draft, Some((segment, _)) if *segment == index);
-                if !drafted && let Some(inserter) = &self.inserter {
+                if !drafted {
                     session.draft = Some((index, PLACEHOLDER.into()));
+                }
+                if (!drafted || !session.at_cursor)
+                    && let Some(inserter) = &self.inserter
+                {
                     inserter.preedit(PLACEHOLDER.into());
                 }
                 let events = self.events.clone();
@@ -633,6 +648,7 @@ impl Daemon {
                             .ok();
                     },
                 );
+                self.show_caption(cx);
             }
             tokativ_audio::Event::Progress(samples) => {
                 let segment = session.spoken;
@@ -676,12 +692,16 @@ impl Daemon {
         // A draft of a later segment stays up, and a placeholder while earlier ones are pending.
         let after = match &session.draft {
             Some((drafted, text)) if *drafted > segment => text.clone(),
-            _ if session.pending > 0 => PLACEHOLDER.to_string(),
-            _ => String::new(),
+            _ => {
+                session.draft =
+                    (session.pending > 0).then(|| (segment + 1, PLACEHOLDER.to_string()));
+                session
+                    .draft
+                    .as_ref()
+                    .map(|(_, text)| text.clone())
+                    .unwrap_or_default()
+            }
         };
-        if after.is_empty() {
-            session.draft = None;
-        }
         let text = match result {
             Ok(text) => text,
             Err(error) => {
@@ -690,23 +710,32 @@ impl Daemon {
             }
         };
         log::debug!("session {id}: {text:?}");
+        // Without drafts at the cursor it only ever shows the placeholder.
+        let at_cursor = match session.at_cursor {
+            true => after,
+            false if session.pending > 0 => PLACEHOLDER.to_string(),
+            false => String::new(),
+        };
+        let before = self.inserter.as_ref().and_then(Inserter::before_cursor);
+        let joiner = session
+            .joiner
+            .get_or_insert_with(|| Joiner::new(before.as_deref(), capitalize));
+        let joined = joiner.join(&restyle(&text, style));
+        if let Some(text) = &joined {
+            session.written.push_str(text);
+        }
         if let Some(inserter) = &self.inserter {
-            let joiner = session.joiner.get_or_insert_with(|| {
-                Joiner::new(inserter.before_cursor().as_deref(), capitalize)
-            });
-            match joiner.join(&restyle(&text, style)) {
-                Some(text) => {
-                    session.written.push_str(&text);
-                    inserter.insert(text, after)
-                }
-                None => inserter.preedit(after),
+            match joined {
+                Some(text) => inserter.insert(text, at_cursor),
+                None => inserter.preedit(at_cursor),
             }
         }
+        self.show_caption(cx);
         self.finish_if_done(cx);
     }
 
     /// Shows a draft of the segment being spoken, unless that segment has finished since.
-    fn drafted(&mut self, id: u64, segment: usize, result: Result<String>) {
+    fn drafted(&mut self, id: u64, segment: usize, result: Result<String>, cx: &mut Context<Self>) {
         let style = &self.applied.style;
         let capitalize = style.capitals == Capitals::AsSpoken;
         let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
@@ -718,16 +747,68 @@ impl Daemon {
         let Ok(text) = result else {
             return;
         };
-        let Some(inserter) = &self.inserter else {
-            return;
-        };
+        let before = self.inserter.as_ref().and_then(Inserter::before_cursor);
         let joiner = session
             .joiner
-            .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref(), capitalize));
-        if let Some(preview) = joiner.preview(&restyle(&text, style)) {
-            log::debug!("session {id}: draft {preview:?}");
-            session.draft = Some((segment, preview.clone()));
+            .get_or_insert_with(|| Joiner::new(before.as_deref(), capitalize));
+        let Some(preview) = joiner.preview(&restyle(&text, style)) else {
+            return;
+        };
+        log::debug!("session {id}: draft {preview:?}");
+        session.draft = Some((segment, preview.clone()));
+        if session.at_cursor
+            && let Some(inserter) = &self.inserter
+        {
             inserter.preedit(preview);
+        }
+        self.show_caption(cx);
+    }
+
+    /// Shows the session's text and the draft after it in the caption, opening the caption
+    /// with the first words. Does nothing while the caption is turned off.
+    fn show_caption(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let pill = self
+            .pill
+            .as_ref()
+            .map(|placed| &placed.pill)
+            .unwrap_or(&self.applied.pill);
+        if !pill.caption {
+            return;
+        }
+        let written = session.written.clone();
+        let draft = session
+            .draft
+            .as_ref()
+            .map(|(_, draft)| draft.clone())
+            .unwrap_or_default();
+        if self.caption.is_none() {
+            if written.trim().is_empty() && draft.trim().is_empty() {
+                return;
+            }
+            // A draft may arrive after the user has moved to another output. Keep its window
+            // with the controls that opened for this session.
+            let display = self.pill.as_ref().and_then(|placed| {
+                placed
+                    .handle
+                    .update(cx, |_, window, cx| {
+                        window.display(cx).map(|display| display.id())
+                    })
+                    .ok()
+                    .flatten()
+            });
+            self.caption = tokativ_ui::caption::open(pill.edge, pill.margin, display, cx)
+                .map_err(|error| log::error!("caption: cannot open: {error:#}"))
+                .ok();
+        }
+        if let Some(caption) = self.caption {
+            cx.defer(move |cx| {
+                caption
+                    .update(cx, |caption, _, cx| caption.show(&written, &draft, cx))
+                    .ok();
+            });
         }
     }
 
@@ -762,6 +843,14 @@ impl Daemon {
         if dismiss && let Some(pill) = self.pill.as_ref().map(|placed| placed.handle) {
             cx.defer(move |cx| {
                 pill.update(cx, |pill, _, cx| pill.dismiss(cx)).ok();
+            });
+        }
+        // The next session starts its caption empty.
+        if let Some(caption) = self.caption.take() {
+            cx.defer(move |cx| {
+                caption
+                    .update(cx, |caption, _, cx| caption.dismiss(cx))
+                    .ok();
             });
         }
         self.publish(cx);

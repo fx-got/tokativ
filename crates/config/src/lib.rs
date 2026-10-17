@@ -227,6 +227,9 @@ pub struct Pill {
     pub edge: PillEdge,
     /// The gap in logical pixels between the pill and the edge of the output.
     pub margin: f32,
+    /// Show what is being said in a caption beside the pill, on the side away from the edge.
+    /// On by default where no draft can show at the cursor, which is everywhere but Wayland.
+    pub caption: bool,
 }
 
 impl Default for Pill {
@@ -234,6 +237,7 @@ impl Default for Pill {
         Self {
             edge: PillEdge::Bottom,
             margin: 48.,
+            caption: !cfg!(target_os = "linux"),
         }
     }
 }

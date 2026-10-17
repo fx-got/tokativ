@@ -1,6 +1,7 @@
-//! The windows: the pill overlay, the settings window and the first-run setup window, all drawn
-//! with Sonora's `ui` crate.
+//! The windows: the pill and its caption, the settings window and the first-run setup window,
+//! all drawn with Sonora's `ui` crate.
 
+pub mod caption;
 mod chrome;
 // Off Linux there is no compositor to give binding directions for, so most of this goes unused.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -8,15 +9,18 @@ mod desktop;
 mod host;
 mod hotkey;
 mod models;
+mod overlay;
 pub mod pill;
 mod radius;
 pub mod settings;
 pub mod setup;
+mod spring;
 mod usage;
 
 use gpui::App;
 use ui::{Look, Rounding, Theme, ThemeKind};
 
+pub use caption::Caption;
 pub use host::{Action, Files, Host, Library, ModelState, Status, Store, entities};
 pub use pill::{Phase, Pill};
 pub use radius::nested_radius;
