@@ -37,6 +37,12 @@ imports = [ inputs.tokativ.homeModules.default ];
 services.tokativ.enable = true;
 ```
 
+Both install the binary from the latest [release](https://github.com/nolight132/tokativ/releases),
+built for x86_64 and aarch64 against glibc 2.35. `nix run github:nolight132/tokativ#tokativ-source`
+builds it from source instead. Without Nix, download the binary for your machine from the release
+and put it on your `PATH` as `tokativ`. It needs the Vulkan loader, wayland, libxkbcommon and
+alsa-lib.
+
 From source you need Rust 1.98, a C++ compiler, cmake, pkg-config, glslc, and the development files
 for Vulkan, SPIRV-Headers, wayland, libxkbcommon, fontconfig, alsa-lib and openssl. Then
 `cargo build --release`.
