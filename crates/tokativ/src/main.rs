@@ -67,7 +67,7 @@ enum Verb {
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-        "info,i18n=off,naga=warn,wgpu=warn,wgpu_hal=error,zbus=warn,tracing=warn,transcribe_cpp=warn",
+        "info,i18n=off,naga=warn,wgpu=warn,wgpu_hal=error,zbus=warn,tracing=warn,transcribe_cpp=warn,pulseaudio=off",
     ))
     .init();
     let cli = Cli::parse();
