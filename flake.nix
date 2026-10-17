@@ -1,5 +1,5 @@
 {
-  description = "Tokativ - local dictation for Wayland";
+  description = "Tokativ - local dictation";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -10,6 +10,7 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
       forEachSystem = fn: lib.genAttrs systems (system: fn nixpkgs.legacyPackages.${system});
 
@@ -41,36 +42,59 @@
         ];
     in
     {
-      # `default` and `tokativ` are the released binary. `tokativ-source` builds this checkout.
-      packages = forEachSystem (pkgs: rec {
-        tokativ-source = pkgs.callPackage ./nix/package.nix { };
-        tokativ-bin = pkgs.callPackage ./nix/package-bin.nix { inherit release tokativ-source; };
-        tokativ = tokativ-bin;
-        default = tokativ-bin;
-      });
+      # `default` and `tokativ` are the released binary where a release has one for the system,
+      # and the source build elsewhere. `tokativ-source` always builds this checkout.
+      packages = forEachSystem (
+        pkgs:
+        let
+          tokativ-source = pkgs.callPackage ./nix/package.nix { };
+          released = builtins.hasAttr pkgs.stdenv.hostPlatform.system release.assets;
+        in
+        {
+          inherit tokativ-source;
+          tokativ = tokativ-source;
+          default = tokativ-source;
+        }
+        // lib.optionalAttrs released rec {
+          tokativ-bin = pkgs.callPackage ./nix/package-bin.nix { inherit release tokativ-source; };
+          tokativ = tokativ-bin;
+          default = tokativ-bin;
+        }
+      );
 
       devShells = forEachSystem (pkgs: {
-        default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            cmake
-            gnumake
-            shaderc
-          ];
-          buildInputs = runtimeLibraries pkgs ++ [
-            pkgs.openssl
-            pkgs.spirv-headers
-            pkgs.vulkan-headers
-          ];
-          LD_LIBRARY_PATH = lib.makeLibraryPath (runtimeLibraries pkgs);
-          ALSA_PLUGIN_DIR = "${pkgs.symlinkJoin {
-            name = "tokativ-alsa-plugins";
-            paths = [
-              "${pkgs.alsa-plugins}/lib/alsa-lib"
-              "${pkgs.pipewire}/lib/alsa-lib"
-            ];
-          }}";
-        };
+        default =
+          if pkgs.stdenv.hostPlatform.isDarwin then
+            pkgs.mkShell {
+              nativeBuildInputs = with pkgs; [
+                pkg-config
+                cmake
+                rustPlatform.bindgenHook
+              ];
+              buildInputs = [ pkgs.apple-sdk_15 ];
+            }
+          else
+            pkgs.mkShell {
+              nativeBuildInputs = with pkgs; [
+                pkg-config
+                cmake
+                gnumake
+                shaderc
+              ];
+              buildInputs = runtimeLibraries pkgs ++ [
+                pkgs.openssl
+                pkgs.spirv-headers
+                pkgs.vulkan-headers
+              ];
+              LD_LIBRARY_PATH = lib.makeLibraryPath (runtimeLibraries pkgs);
+              ALSA_PLUGIN_DIR = "${pkgs.symlinkJoin {
+                name = "tokativ-alsa-plugins";
+                paths = [
+                  "${pkgs.alsa-plugins}/lib/alsa-lib"
+                  "${pkgs.pipewire}/lib/alsa-lib"
+                ];
+              }}";
+            };
       });
 
       overlays.default = final: _prev: {

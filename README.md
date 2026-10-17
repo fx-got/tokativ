@@ -37,19 +37,21 @@ imports = [ inputs.tokativ.homeModules.default ];
 services.tokativ.enable = true;
 ```
 
-Both install the binary from the latest [release](https://github.com/nolight132/tokativ/releases),
-built for x86_64 and aarch64 against glibc 2.35. `nix run github:nolight132/tokativ#tokativ-source`
-builds it from source instead. Without Nix, download the binary for your machine from the release
-and put it on your `PATH` as `tokativ`. It needs the Vulkan loader, wayland, libxkbcommon and
-alsa-lib.
+On Linux both install the binary from the latest
+[release](https://github.com/nolight132/tokativ/releases), built for x86_64 and aarch64 against glibc
+2.35, and `nix run github:nolight132/tokativ#tokativ-source` builds it from source instead. On Apple
+silicon Macs they build it from source, and Home Manager runs it as a launchd agent.
+
+On Linux without Nix, download the binary for your machine from the release and put it on your
+`PATH` as `tokativ`. It needs the Vulkan loader, wayland, libxkbcommon and alsa-lib.
 
 From source you need Rust 1.98, a C++ compiler, cmake, pkg-config, glslc, and the development files
 for Vulkan, SPIRV-Headers, wayland, libxkbcommon, fontconfig, alsa-lib and openssl. Then
 `cargo build --release`.
 
-macOS and Windows have no release binaries yet, so build it there with Rust 1.98, cmake and a C++
-compiler: Xcode on macOS, whose Metal compiler builds the shaders, and the Visual Studio Build Tools
-with the Vulkan SDK on Windows. Then `cargo build --release` and run `target/release/tokativ`.
+macOS and Windows have no release binaries yet, so without Nix build it there with Rust 1.98, cmake
+and a C++ compiler: the Xcode command line tools on macOS, and the Visual Studio Build Tools with the
+Vulkan SDK on Windows. Then `cargo build --release` and run `target/release/tokativ`.
 
 ## Use
 

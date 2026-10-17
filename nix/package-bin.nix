@@ -79,5 +79,7 @@ stdenv.mkDerivation {
 
   meta = tokativ-source.meta // {
     sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
+    # Releases carry binaries for Linux only.
+    platforms = builtins.attrNames release.assets;
   };
 }

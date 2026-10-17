@@ -30,6 +30,10 @@ global-hotkey.workspace = true
 tray-icon.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Compiles GPUI's Metal shaders when the app starts, so building needs no full Xcode for its
+# offline Metal compiler. That keeps the Nix build and a plain `cargo build` on the command line
+# tools.
+gpui_platform = { workspace = true, features = ["runtime_shaders"] }
 objc2.workspace = true
 objc2-app-kit.workspace = true
 
