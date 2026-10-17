@@ -6545,6 +6545,7 @@ dependencies = [
  "anyhow",
  "hound",
  "log",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

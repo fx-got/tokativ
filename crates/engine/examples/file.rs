@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     };
     let mut engine = Gguf::load(&model, processor)?;
     println!("running on {}", engine.device());
-    let mut joiner = Joiner::new(None);
+    let mut joiner = Joiner::new(None, true);
     for segment in segments {
         let started = Instant::now();
         let text = engine.transcribe(&segment.samples)?;

@@ -1,6 +1,69 @@
-//! Turns each segment's raw transcript into the exact text to insert after what came before.
+//! Turns each segment's raw transcript into the exact text to insert after what came before:
+//! the user's writing style first, then the spacing and capitals that join it to the text around.
+
+use std::sync::LazyLock;
+
+use regex::Regex;
+use tokativ_config::{Capitals, Style};
 
 const TERMINALS: [char; 4] = ['.', '!', '?', '…'];
+
+/// Laughter written with hyphens, in Russian and English: "ха-ха-ха", "хе-хе", "ha-ha".
+static LAUGHTER: LazyLock<Regex> = LazyLock::new(|| {
+    let syllable = "(?:ха|хе|хи|хо|ha|he|hi|ho)";
+    Regex::new(&format!(r"(?i)\b{syllable}(?:-{syllable})+\b")).expect("laughter pattern")
+});
+
+/// Rewrites one phrase in the user's style. It runs before [`Joiner::join`], which then sees
+/// the phrase as it will be inserted.
+pub fn restyle(text: &str, style: &Style) -> String {
+    let mut text = text.trim().to_owned();
+    for replacement in &style.replacements {
+        if replacement.from.is_empty() {
+            continue;
+        }
+        let pattern = format!("(?i){}", regex::escape(&replacement.from));
+        if let Ok(pattern) = Regex::new(&pattern) {
+            text = pattern
+                .replace_all(&text, regex::NoExpand(&replacement.to))
+                .into_owned();
+        }
+    }
+    if style.join_laughter {
+        text = LAUGHTER
+            .replace_all(&text, |found: &regex::Captures| found[0].replace('-', ""))
+            .into_owned();
+    }
+    if !style.final_period && text.ends_with('.') && !text.ends_with("..") {
+        text.pop();
+    }
+    match style.capitals {
+        Capitals::AsSpoken => text,
+        Capitals::Lowercase => text.to_lowercase(),
+        Capitals::LowerStarts => lower_starts(&text),
+    }
+}
+
+/// Lowercases the first letter of every sentence, sparing words whose capital belongs to them.
+fn lower_starts(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at_start = true;
+    for (index, c) in text.char_indices() {
+        if at_start && c.is_alphabetic() {
+            at_start = false;
+            match keeps_capital(&text[index..]) {
+                true => out.push(c),
+                false => out.extend(c.to_lowercase()),
+            }
+            continue;
+        }
+        if TERMINALS.contains(&c) {
+            at_start = true;
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// Joins a session's segments into running text. It remembers whether the text so far ends
 /// mid-sentence, so the next segment gets a separating space and a capital only where one
@@ -11,15 +74,19 @@ pub struct Joiner {
     after_text: bool,
     /// The text before the cursor ends inside a sentence.
     mid_sentence: bool,
+    /// Sentence starts get a capital. Off when the style writes them lowercase.
+    capitalize: bool,
 }
 
 impl Joiner {
     /// A joiner for a session that starts with `before` left of the cursor, when the insertion
-    /// backend can tell. Without it the first segment is treated as a fresh sentence.
-    pub fn new(before: Option<&str>) -> Self {
+    /// backend can tell. Without it the first segment is treated as a fresh sentence. With
+    /// `capitalize` off, sentence starts are left as the style wrote them.
+    pub fn new(before: Option<&str>, capitalize: bool) -> Self {
         let mut joiner = Self {
             after_text: false,
             mid_sentence: false,
+            capitalize,
         };
         if let Some(before) = before {
             let trimmed = before.trim_end();
@@ -49,6 +116,7 @@ impl Joiner {
         let mut chars = text.chars();
         if let Some(first) = chars.next() {
             match (self.mid_sentence, keeps_capital(&text)) {
+                (false, _) if !self.capitalize => out.push(first),
                 (false, _) => out.extend(first.to_uppercase()),
                 (true, false) => out.extend(first.to_lowercase()),
                 (true, true) => out.push(first),
@@ -79,7 +147,7 @@ mod tests {
 
     #[test]
     fn segments_join_into_sentences() {
-        let mut joiner = Joiner::new(None);
+        let mut joiner = Joiner::new(None, true);
         assert_eq!(
             joiner.join("  hello there ").as_deref(),
             Some("Hello there")
@@ -94,7 +162,7 @@ mod tests {
 
     #[test]
     fn mid_sentence_capitals_drop_unless_they_belong() {
-        let mut joiner = Joiner::new(None);
+        let mut joiner = Joiner::new(None, true);
         assert_eq!(joiner.join("And so").as_deref(), Some("And so"));
         assert_eq!(joiner.join("Ask not").as_deref(), Some(" ask not"));
         assert_eq!(joiner.join("I think").as_deref(), Some(" I think"));
@@ -104,12 +172,36 @@ mod tests {
     }
 
     #[test]
+    fn style_rewrites_phrases() {
+        let style = Style {
+            capitals: Capitals::LowerStarts,
+            final_period: false,
+            join_laughter: true,
+            replacements: vec![tokativ_config::Replacement {
+                from: "токатив".into(),
+                to: "Tokativ".into(),
+            }],
+        };
+        assert_eq!(
+            restyle("Ха-ха-ха, Токатив работает. Это NASA.", &style),
+            "хахаха, Tokativ работает. это NASA"
+        );
+        let lowercase = Style {
+            capitals: Capitals::Lowercase,
+            ..Style::default()
+        };
+        assert_eq!(restyle("Hello There.", &lowercase), "hello there.");
+        let mut joiner = Joiner::new(None, false);
+        assert_eq!(joiner.join("hi").as_deref(), Some("hi"));
+    }
+
+    #[test]
     fn context_before_the_cursor_counts() {
-        let mut joiner = Joiner::new(Some("Dear team,"));
+        let mut joiner = Joiner::new(Some("Dear team,"), true);
         assert_eq!(joiner.join("thanks").as_deref(), Some(" thanks"));
-        let mut joiner = Joiner::new(Some("Done. "));
+        let mut joiner = Joiner::new(Some("Done. "), true);
         assert_eq!(joiner.join("next").as_deref(), Some("Next"));
-        let mut joiner = Joiner::new(Some(""));
+        let mut joiner = Joiner::new(Some(""), true);
         assert_eq!(joiner.join("start").as_deref(), Some("Start"));
     }
 }

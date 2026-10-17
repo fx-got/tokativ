@@ -9,8 +9,8 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, KeyBinding, QuitMode, WindowHandle};
 use notify::{RecursiveMode, Watcher as _};
 use tokativ_audio::{Levels, Options, Recorder, Silero, SpeechDetector, Timing};
-use tokativ_config::{Config, config_dir, config_path, socket_path};
-use tokativ_engine::{Joiner, ModelId, Transcriber};
+use tokativ_config::{Capitals, Config, config_dir, config_path, socket_path};
+use tokativ_engine::{Joiner, ModelId, Transcriber, restyle};
 use tokativ_input::{Inserter, Key, Method};
 use tokativ_ui::{Action, Host, Library, Phase, Pill, Status, Store};
 
@@ -590,6 +590,8 @@ impl Daemon {
     }
 
     fn transcribed(&mut self, id: u64, result: Result<String>, cx: &mut Context<Self>) {
+        let style = &self.applied.style;
+        let capitalize = style.capitals == Capitals::AsSpoken;
         let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
             return;
         };
@@ -614,10 +616,10 @@ impl Daemon {
         };
         log::debug!("session {id}: {text:?}");
         if let Some(inserter) = &self.inserter {
-            let joiner = session
-                .joiner
-                .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref()));
-            match joiner.join(&text) {
+            let joiner = session.joiner.get_or_insert_with(|| {
+                Joiner::new(inserter.before_cursor().as_deref(), capitalize)
+            });
+            match joiner.join(&restyle(&text, style)) {
                 Some(text) => inserter.insert(text, after),
                 None => inserter.preedit(after),
             }
@@ -627,6 +629,8 @@ impl Daemon {
 
     /// Shows a draft of the segment being spoken, unless that segment has finished since.
     fn drafted(&mut self, id: u64, segment: usize, result: Result<String>) {
+        let style = &self.applied.style;
+        let capitalize = style.capitals == Capitals::AsSpoken;
         let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
             return;
         };
@@ -641,8 +645,8 @@ impl Daemon {
         };
         let joiner = session
             .joiner
-            .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref()));
-        if let Some(preview) = joiner.preview(&text) {
+            .get_or_insert_with(|| Joiner::new(inserter.before_cursor().as_deref(), capitalize));
+        if let Some(preview) = joiner.preview(&restyle(&text, style)) {
             log::debug!("session {id}: draft {preview:?}");
             session.draft = Some((segment, preview.clone()));
             inserter.preedit(preview);

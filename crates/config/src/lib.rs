@@ -127,6 +127,7 @@ pub struct Config {
     /// The setup window was finished. Until then it opens whenever the daemon starts, even
     /// when choices made in it were already saved.
     pub setup_done: bool,
+    pub style: Style,
 }
 
 impl Default for Config {
@@ -143,6 +144,7 @@ impl Default for Config {
             tray: true,
             live_preview: true,
             setup_done: false,
+            style: Style::default(),
         }
     }
 }
@@ -216,6 +218,62 @@ impl Default for Pill {
         Self {
             edge: PillEdge::Bottom,
             margin: 48.,
+        }
+    }
+}
+
+/// How sentence starts are capitalized in dictated text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Capitals {
+    /// As the model writes it, with a capital at each sentence start.
+    #[default]
+    AsSpoken,
+    /// Sentences start lowercase. Names and acronyms keep their capitals.
+    LowerStarts,
+    /// Everything lowercase.
+    Lowercase,
+}
+
+impl Capitals {
+    pub const ALL: [Self; 3] = [Self::AsSpoken, Self::LowerStarts, Self::Lowercase];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AsSpoken => "As spoken",
+            Self::LowerStarts => "Lowercase starts",
+            Self::Lowercase => "All lowercase",
+        }
+    }
+}
+
+/// One fixed rewrite applied to every phrase, matched regardless of case.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Replacement {
+    pub from: String,
+    pub to: String,
+}
+
+/// How dictated text is rewritten before it is inserted. The models cannot take instructions,
+/// so style is applied to their output by rule.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Style {
+    pub capitals: Capitals,
+    /// Keep the period a model puts at the end of a phrase.
+    pub final_period: bool,
+    /// Write hyphenated laughter as one word, "ха-ха-ха" as "хахаха".
+    pub join_laughter: bool,
+    pub replacements: Vec<Replacement>,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            capitals: Capitals::AsSpoken,
+            final_period: true,
+            join_laughter: false,
+            replacements: Vec::new(),
         }
     }
 }

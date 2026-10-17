@@ -16,7 +16,7 @@ use tokativ_config::Processor;
 use transcribe_cpp::{Backend, ModelOptions, RunOptions, Session};
 
 pub use models::ModelId;
-pub use text::Joiner;
+pub use text::{Joiner, restyle};
 
 /// A loaded speech-to-text model.
 pub trait Engine: Send {
