@@ -40,6 +40,9 @@ enum Verb {
         /// Link the models already downloaded, so setup can be tried without downloading them
         #[arg(long)]
         with_models: bool,
+        /// Open the setup window on this step
+        #[arg(long, value_parser = ["models", "microphone", "try", "hotkey"])]
+        step: Option<String>,
     },
     /// Start dictating, or confirm the running session
     Toggle,
@@ -70,7 +73,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         None | Some(Verb::Daemon) => Config::load().and_then(daemon::run),
-        Some(Verb::Sandbox { keep, with_models }) => sandbox(keep, with_models),
+        Some(Verb::Sandbox {
+            keep,
+            with_models,
+            step,
+        }) => sandbox(keep, with_models, step),
         Some(verb) => send(command(verb)),
     };
     match result {
@@ -101,7 +108,7 @@ fn command(verb: Verb) -> Command {
 /// Runs a daemon against a folder of its own, fresh unless `keep` is set, so the first-run flow
 /// can be tried again and again without touching the real install. Commands reach it with the
 /// sandbox variable set to the same folder.
-fn sandbox(keep: bool, with_models: bool) -> Result<()> {
+fn sandbox(keep: bool, with_models: bool, step: Option<String>) -> Result<()> {
     let real_models = tokativ_config::models_dir();
     let folder = tokativ_config::sandbox().unwrap_or_else(|| {
         dirs::state_dir()
@@ -118,7 +125,12 @@ fn sandbox(keep: bool, with_models: bool) -> Result<()> {
     }
     std::fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
     // SAFETY: nothing else runs yet, so no other thread can be reading the environment.
-    unsafe { std::env::set_var(SANDBOX_VARIABLE, &folder) };
+    unsafe {
+        std::env::set_var(SANDBOX_VARIABLE, &folder);
+        if let Some(step) = &step {
+            std::env::set_var(tokativ_ui::setup::STEP_VARIABLE, step);
+        }
+    }
     if with_models {
         link_models(&real_models, &tokativ_config::models_dir())?;
     }

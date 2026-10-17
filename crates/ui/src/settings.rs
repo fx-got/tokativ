@@ -24,8 +24,6 @@ const MARGIN: (f32, f32) = (0., 240.);
 const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
 /// The tallest the microphone menu grows before it scrolls, about seven rows.
 const DEVICE_MENU_HEIGHT: gpui::Pixels = px(300.);
-pub(crate) const NIRI_BIND: &str =
-    "Mod+D { spawn \"tokativ\" \"toggle\"; }\nMod+Shift+D { spawn \"tokativ\" \"cancel\"; }";
 
 struct Open(WindowHandle<Settings>);
 

@@ -2,6 +2,7 @@
 //! with Sonora's `ui` crate.
 
 mod chrome;
+mod desktop;
 mod host;
 pub mod pill;
 mod radius;

@@ -221,27 +221,20 @@ pub fn meter(fraction: f32, height: Pixels, cx: &App) -> impl IntoElement {
         )
 }
 
-/// How far a snippet sits from the edges of the group it closes.
-const CODE_INSET: Pixels = px(6.);
-
-/// A box of monospaced text, such as a config snippet to copy. It closes a group, inset by the
-/// same amount from the group's sides and bottom, so its lower corners follow the group's.
+/// A box of monospaced text, such as a config snippet to copy, shaped like the cards around it.
 pub fn code(text: &str, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    let radius = crate::nested_radius(GROUP_RADIUS, CODE_INSET);
-    div().w_full().p(CODE_INSET).child(
-        div()
-            .w_full()
-            .px(GROUP_PADDING - CODE_INSET)
-            .py_3()
-            .rounded(radius)
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border)
-            .font_family("monospace")
-            .text_size(theme.text(Text::Small))
-            .child(text.to_owned()),
-    )
+    div()
+        .w_full()
+        .px(GROUP_PADDING)
+        .py_3()
+        .rounded(GROUP_RADIUS)
+        .bg(theme.secondary.opacity(0.45))
+        .border_1()
+        .border_color(theme.border.opacity(0.6))
+        .font_family("monospace")
+        .text_size(theme.text(Text::Small))
+        .child(text.to_owned())
 }
 
 /// Bytes as megabytes or gigabytes, the way the model list shows sizes.

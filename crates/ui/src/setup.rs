@@ -5,23 +5,35 @@ use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, App, ClipboardItem, Context, Entity, Global, ScrollHandle,
-    SharedString, Size, Window, WindowHandle, div, px, relative, svg,
+    SharedString, Size, Task, Window, WindowHandle, div, px, relative, svg,
 };
-use tokativ_audio::{InputDevice, Recorder};
+use std::time::Instant;
+
+use tokativ_audio::{InputDevice, Levels, Recorder};
 use tokativ_config::Model;
 use ui::{
     ActiveTheme as _, Button, Input, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller, Text,
 };
 
 use crate::chrome::{self, meter};
+use crate::desktop::{self, Bound, Desktop};
 use crate::host::{Action, Host, Library, ModelState, Status, Store};
-use crate::settings::{NIRI_BIND, device_menu, model_row};
+use crate::settings::{device_menu, model_row};
 
+/// Names the step the setup window opens on, for working on one step in the sandbox.
+pub const STEP_VARIABLE: &str = "TOKATIV_SETUP_STEP";
 const WIDTH: f32 = 600.;
 const HEIGHT: f32 = 560.;
 /// The height of a step segment and how long the newest one takes to fill.
 const SEGMENT: gpui::Pixels = px(6.);
 const FILL: std::time::Duration = std::time::Duration::from_millis(420);
+/// The level meter spans this many dBFS up to full scale, and settles up and down with these
+/// time constants in seconds.
+const METER_FLOOR: f32 = -60.;
+/// How often the hotkey step looks at the desktop config again.
+const BINDING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+const METER_ATTACK: f32 = 0.03;
+const METER_RELEASE: f32 = 0.3;
 
 struct Open(WindowHandle<Setup>);
 
@@ -39,7 +51,15 @@ pub fn open(cx: &mut App) {
     let options = chrome::options("Set up Tokativ", Size::new(px(WIDTH), px(HEIGHT)), cx);
     match cx.open_window(options, |window, cx| {
         window.set_rem_size(cx.theme().font_size);
-        cx.new(|cx| Setup::new(window, cx))
+        cx.new(|cx| {
+            let mut setup = Setup::new(window, cx);
+            let first = std::env::var(STEP_VARIABLE)
+                .ok()
+                .and_then(|id| Step::ALL.into_iter().find(|step| step.id() == id))
+                .unwrap_or(Step::Models);
+            setup.go(first, window, cx);
+            setup
+        })
     }) {
         Ok(handle) => cx.set_global(Open(handle)),
         Err(error) => log::error!("setup: cannot open the window: {error:#}"),
@@ -56,6 +76,16 @@ enum Step {
 
 impl Step {
     const ALL: [Self; 4] = [Self::Models, Self::Microphone, Self::Try, Self::Hotkey];
+
+    /// The name the sandbox's `--step` flag takes.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Models => "models",
+            Self::Microphone => "microphone",
+            Self::Try => "try",
+            Self::Hotkey => "hotkey",
+        }
+    }
 
     fn title(self) -> &'static str {
         match self {
@@ -99,6 +129,18 @@ pub struct Setup {
     devices: Vec<InputDevice>,
     /// Feeds the level meter while the microphone step is shown.
     monitor: Option<Recorder>,
+    desktop: Desktop,
+    /// The binding found in the desktop's config, looked for again while the hotkey step shows.
+    bound: Option<Bound>,
+    /// A session started while the hotkey step showed, so the key is known to work.
+    pressed: bool,
+    _watching: Option<Task<()>>,
+    /// What the meter reads, shared with the recorder as it opens.
+    levels: Levels,
+    /// Counts microphone openings, so one that finishes late can tell it is stale.
+    listening: u64,
+    meter_shown: f32,
+    meter_beat: Option<Instant>,
     field: Entity<Input>,
     scrollbar: Entity<Scrollbar>,
     device_scrollbar: Entity<Scrollbar>,
@@ -109,7 +151,13 @@ impl Setup {
         let host = Host::global(cx);
         cx.observe(&host.store, |_, _, cx| cx.notify()).detach();
         cx.observe(&host.library, |_, _, cx| cx.notify()).detach();
-        cx.observe(&host.status, |_, _, cx| cx.notify()).detach();
+        cx.observe(&host.status, |this, status, cx| {
+            if this.step == Step::Hotkey && status.read(cx).recording {
+                this.pressed = true;
+            }
+            cx.notify();
+        })
+        .detach();
         cx.observe_window_appearance(window, |_, _, cx| {
             crate::refresh_theme(cx);
             cx.notify();
@@ -125,6 +173,14 @@ impl Setup {
             popovers: Popovers::default(),
             devices: tokativ_audio::input_devices(),
             monitor: None,
+            desktop: Desktop::detect(),
+            bound: None,
+            pressed: false,
+            _watching: None,
+            levels: Levels::default(),
+            listening: 0,
+            meter_shown: 0.,
+            meter_beat: None,
             field,
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
@@ -134,7 +190,9 @@ impl Setup {
     fn go(&mut self, step: Step, window: &mut Window, cx: &mut Context<Self>) {
         self.step = step;
         self.monitor = None;
+        self._watching = None;
         match step {
+            Step::Hotkey => self.watch_binding(cx),
             Step::Microphone => self.listen(cx),
             Step::Try => {
                 let focus = self.field.focus_handle(cx);
@@ -146,8 +204,15 @@ impl Setup {
     }
 
     /// Opens the chosen microphone for the level meter.
+    /// Opens the chosen microphone for the level meter. Opening takes a moment, so it happens in
+    /// the background, and a device that opens after the step was left or another was chosen is
+    /// closed again.
     fn listen(&mut self, cx: &mut Context<Self>) {
         self.monitor = None;
+        self.listening += 1;
+        let generation = self.listening;
+        self.levels = Levels::default();
+        let levels = self.levels.clone();
         let device = self.store.read(cx).config().input_device.clone();
         let timing = tokativ_audio::Timing {
             threshold: 0.5,
@@ -155,19 +220,68 @@ impl Setup {
             max_segment_s: 20,
             preroll_ms: 200,
         };
-        match Recorder::start(
-            tokativ_audio::Options {
-                device,
-                timing,
-                progress: None,
-            },
-            None,
-            tokativ_audio::Levels::default(),
-            |_| {},
-        ) {
-            Ok(recorder) => self.monitor = Some(recorder),
-            Err(error) => log::error!("setup: cannot open the microphone: {error:#}"),
-        }
+        let opening = cx.background_spawn(async move {
+            Recorder::start(
+                tokativ_audio::Options {
+                    device,
+                    timing,
+                    progress: None,
+                },
+                None,
+                levels,
+                |_| {},
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let opened = opening.await;
+            this.update(cx, |this, _| match opened {
+                Ok(recorder) if this.listening == generation && this.step == Step::Microphone => {
+                    this.monitor = Some(recorder);
+                }
+                Ok(recorder) => recorder.cancel(),
+                Err(error) => log::error!("setup: cannot open the microphone: {error:#}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Looks for a binding now and every second while the hotkey step shows, so one added in
+    /// another window is picked up without leaving the step.
+    fn watch_binding(&mut self, cx: &mut Context<Self>) {
+        let desktop = self.desktop;
+        self._watching = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let bound = cx.background_spawn(async move { desktop.bound() }).await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.bound != bound {
+                        this.bound = bound;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(BINDING_POLL).await;
+            }
+        }));
+    }
+
+    /// Moves the meter towards the input's loudness: up at once so peaks register, down slowly
+    /// so the eye can follow, at a rate set by the real time between frames.
+    fn meter(&mut self) -> f32 {
+        let now = Instant::now();
+        let elapsed = self
+            .meter_beat
+            .replace(now)
+            .map_or(0., |beat| (now - beat).as_secs_f32().min(0.1));
+        let target = ((self.levels.loudness() - METER_FLOOR) / -METER_FLOOR).clamp(0., 1.);
+        let settle = match target > self.meter_shown {
+            true => METER_ATTACK,
+            false => METER_RELEASE,
+        };
+        self.meter_shown += (target - self.meter_shown) * (1. - (-elapsed / settle).exp());
+        self.meter_shown
     }
 
     fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -209,7 +323,7 @@ impl Setup {
             }))
     }
 
-    fn microphone(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn microphone(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let device = self.store.read(cx).config().input_device.clone();
         let name = device
             .as_ref()
@@ -241,14 +355,8 @@ impl Setup {
                 this.listen(cx);
             }))
         }));
-        let level = self
-            .monitor
-            .as_ref()
-            .map(|monitor| monitor.levels().peak())
-            .unwrap_or(0.);
-        if self.monitor.is_some() {
-            window.request_animation_frame();
-        }
+        let level = self.meter();
+        window.request_animation_frame();
 
         div()
             .flex()
@@ -298,28 +406,100 @@ impl Setup {
             })
     }
 
+    /// Directions for binding the toggle, written for the desktop this session runs in. The step
+    /// watches the config for a binding and confirms once the key actually starts a session.
     fn hotkey(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let desktop = self.desktop;
+        let snippet = desktop.snippet();
+        let (icon, status, ready) = match (&self.bound, self.pressed) {
+            (_, true) => (
+                "icons/circle-check.svg",
+                "The key works. Press it once more to close the pill.".to_string(),
+                true,
+            ),
+            (Some(bound), false) => (
+                "icons/info.svg",
+                format!(
+                    "Found {} in {}. Press it now to check it.",
+                    bound.keys,
+                    bound
+                        .file
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                ),
+                false,
+            ),
+            (None, false) => (
+                "icons/info.svg",
+                "No key runs Tokativ yet. Add one, then press it here to check it.".to_string(),
+                false,
+            ),
+        };
+        let status = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px(chrome::GROUP_PADDING)
+            .py_3()
+            .rounded(chrome::GROUP_RADIUS)
+            .border_1()
+            .border_color(match ready {
+                true => theme.foreground.opacity(0.5),
+                false => theme.border.opacity(0.6),
+            })
+            .child(
+                svg()
+                    .path(icons::path(icon))
+                    .size(px(16.))
+                    .flex_none()
+                    .text_color(match ready {
+                        true => theme.foreground,
+                        false => theme.muted_foreground,
+                    }),
+            )
+            .child(div().text_size(theme.text(Text::Small)).child(status));
+
+        let config = desktop.config_file();
+        let actions = div()
+            .flex()
+            .gap_2()
+            .child(
+                Button::new("copy-bind")
+                    .label("Copy")
+                    .icon("icons/copy.svg")
+                    .small()
+                    .outline()
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(snippet.to_owned()))
+                    }),
+            )
+            .when_some(config, |this, config| {
+                this.child(
+                    Button::new("open-config")
+                        .label("Open config")
+                        .icon("icons/external-link.svg")
+                        .small()
+                        .outline()
+                        .on_click(move |_, _, _| desktop::open(&config)),
+                )
+            });
+
         div()
             .flex()
             .flex_col()
-            .gap_4()
-            .child(intro(
-                "Bind the toggle in your niri config. The first press opens the pill, the second inserts the rest and closes it.",
-                cx,
-            ))
-            .child(chrome::code(NIRI_BIND, cx))
+            .gap_3()
+            .child(status)
             .child(
-                div().child(
-                    Button::new("copy-bind")
-                        .label("Copy")
-                        .icon("icons/copy.svg")
-                        .small()
-                        .outline()
-                        .on_click(|_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(NIRI_BIND.to_owned()))
-                        }),
-                ),
+                div()
+                    .pt_2()
+                    .child(ui::eyebrow(format!("{} detected", desktop.name()), cx)),
             )
+            .child(intro(desktop.directions(), cx))
+            .when(desktop.supported(), |this| {
+                this.child(chrome::code(snippet, cx)).child(actions)
+            })
     }
 
     fn can_advance(&self, cx: &App) -> bool {

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+dirs.workspace = true
 futures.workspace = true
 gpui.workspace = true
 icons.workspace = true
