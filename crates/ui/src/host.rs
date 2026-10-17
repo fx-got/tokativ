@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, Global};
-use tokativ_config::{Config, Model};
-use tokativ_engine::models;
+use tokativ_config::Config;
+use tokativ_engine::ModelId;
+use tokativ_engine::models::{self, Installed, RemoteFile, Repository};
 
 /// What a window asks the daemon to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +107,8 @@ pub struct Status {
     /// Why the method is not the one asked for, when it is not.
     pub note: Option<String>,
     pub recording: bool,
+    /// The device the loaded model runs on, once one has loaded.
+    pub device: Option<String>,
 }
 
 /// Where one model stands on disk.
@@ -117,71 +120,93 @@ pub enum ModelState {
     Failed(String),
 }
 
-/// The downloadable models and their state. Downloads run on their own threads and report
-/// progress here.
+/// The files of one repository, as the search panel lists them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Files {
+    Loading,
+    Loaded(Vec<RemoteFile>),
+    Failed(String),
+}
+
+/// A search of Hugging Face and what came back.
+#[derive(Default)]
+pub struct Search {
+    pub query: String,
+    pub results: Vec<Repository>,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// The files of repositories the user opened, by repository.
+    pub files: HashMap<String, Files>,
+    /// Counts searches, so a slow answer to an old query is dropped.
+    generation: u64,
+}
+
+/// The installed models, the downloads in flight, and searches of the hub. Downloads and
+/// requests run off the main thread and report back here.
 pub struct Library {
-    states: HashMap<Model, ModelState>,
-    cancels: HashMap<Model, Arc<AtomicBool>>,
+    installed: Vec<Installed>,
+    downloads: HashMap<ModelId, ModelState>,
+    cancels: HashMap<ModelId, Arc<AtomicBool>>,
+    pub search: Search,
 }
 
 const PROGRESS_TICK: Duration = Duration::from_millis(120);
 
 impl Library {
     pub fn new() -> Self {
-        let mut library = Self {
-            states: HashMap::new(),
+        Self {
+            installed: models::installed(),
+            downloads: HashMap::new(),
             cancels: HashMap::new(),
-        };
-        library.scan();
-        library
+            search: Search::default(),
+        }
     }
 
-    pub fn state(&self, kind: Model) -> ModelState {
-        self.states
-            .get(&kind)
-            .cloned()
-            .unwrap_or(ModelState::Missing)
+    pub fn installed_models(&self) -> &[Installed] {
+        &self.installed
     }
 
-    pub fn installed(&self, kind: Model) -> bool {
-        matches!(self.state(kind), ModelState::Installed { .. })
+    pub fn state(&self, id: &ModelId) -> ModelState {
+        if let Some(state) = self.downloads.get(id) {
+            return state.clone();
+        }
+        match self.installed.iter().find(|model| &model.id == id) {
+            Some(model) => ModelState::Installed { bytes: model.bytes },
+            None => ModelState::Missing,
+        }
+    }
+
+    pub fn installed(&self, id: &ModelId) -> bool {
+        self.installed.iter().any(|model| &model.id == id)
     }
 
     pub fn any_installed(&self) -> bool {
-        Model::ALL.into_iter().any(|kind| self.installed(kind))
+        !self.installed.is_empty()
     }
 
-    fn scan(&mut self) {
-        for kind in Model::ALL {
-            if matches!(self.state(kind), ModelState::Downloading { .. }) {
-                continue;
-            }
-            let state = match models::installed(kind) {
-                Some(bytes) => ModelState::Installed { bytes },
-                None => ModelState::Missing,
-            };
-            self.states.insert(kind, state);
-        }
+    fn rescan(&mut self) {
+        self.installed = models::installed();
     }
 
-    pub fn download(&mut self, kind: Model, cx: &mut Context<Self>) {
-        if matches!(self.state(kind), ModelState::Downloading { .. }) {
+    pub fn download(&mut self, id: ModelId, cx: &mut Context<Self>) {
+        if matches!(self.state(&id), ModelState::Downloading { .. }) {
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancels.insert(kind, cancel.clone());
-        self.states
-            .insert(kind, ModelState::Downloading { done: 0, total: 0 });
+        self.cancels.insert(id.clone(), cancel.clone());
+        self.downloads
+            .insert(id.clone(), ModelState::Downloading { done: 0, total: 0 });
         cx.notify();
 
         let progress = Arc::new(Mutex::new((0u64, 0u64)));
         let reported = progress.clone();
         let (sender, receiver) = futures::channel::oneshot::channel();
+        let fetched = id.clone();
         std::thread::Builder::new()
-            .name(format!("download-{}", kind.id()))
+            .name("download".into())
             .spawn(move || {
                 let result = models::download(
-                    kind,
+                    &fetched,
                     &|done, total| *reported.lock().expect("progress lock") = (done, total),
                     &cancel,
                 );
@@ -197,9 +222,10 @@ impl Library {
                     futures::future::Either::Left((result, _)) => break result,
                     futures::future::Either::Right(_) => {
                         let (done, total) = *progress.lock().expect("progress lock");
+                        let id = id.clone();
                         let updated = this.update(cx, |this, cx| {
-                            this.states
-                                .insert(kind, ModelState::Downloading { done, total });
+                            this.downloads
+                                .insert(id, ModelState::Downloading { done, total });
                             cx.notify();
                         });
                         if updated.is_err() {
@@ -209,20 +235,22 @@ impl Library {
                 }
             };
             this.update(cx, |this, cx| {
-                this.cancels.remove(&kind);
-                let state = match result {
-                    Ok(Ok(())) => match models::installed(kind) {
-                        Some(bytes) => ModelState::Installed { bytes },
-                        None => ModelState::Failed("the download left no model".into()),
-                    },
-                    Ok(Err(error)) if error.is::<models::Cancelled>() => ModelState::Missing,
+                this.cancels.remove(&id);
+                this.downloads.remove(&id);
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) if error.is::<models::Cancelled>() => {}
                     Ok(Err(error)) => {
-                        log::error!("models: {} download failed: {error:#}", kind.id());
-                        ModelState::Failed(format!("{error:#}"))
+                        log::error!("models: {} download failed: {error:#}", id.key());
+                        this.downloads
+                            .insert(id, ModelState::Failed(format!("{error:#}")));
                     }
-                    Err(_) => ModelState::Failed("the download thread died".into()),
-                };
-                this.states.insert(kind, state);
+                    Err(_) => {
+                        this.downloads
+                            .insert(id, ModelState::Failed("the download thread died".into()));
+                    }
+                }
+                this.rescan();
                 cx.notify();
             })
             .ok();
@@ -230,18 +258,83 @@ impl Library {
         .detach();
     }
 
-    pub fn cancel(&mut self, kind: Model) {
-        if let Some(cancel) = self.cancels.get(&kind) {
+    pub fn cancel(&mut self, id: &ModelId) {
+        if let Some(cancel) = self.cancels.get(id) {
             cancel.store(true, Ordering::Relaxed);
         }
     }
 
-    pub fn delete(&mut self, kind: Model, cx: &mut Context<Self>) {
-        if let Err(error) = models::delete(kind) {
-            log::error!("models: cannot delete {}: {error:#}", kind.id());
+    pub fn delete(&mut self, id: &ModelId, cx: &mut Context<Self>) {
+        if let Err(error) = models::delete(id) {
+            log::error!("models: cannot delete {}: {error:#}", id.key());
         }
-        self.scan();
+        self.downloads.remove(id);
+        self.rescan();
         cx.notify();
+    }
+
+    /// Searches the hub for `query`. An empty query clears the results.
+    pub fn search(&mut self, query: String, cx: &mut Context<Self>) {
+        self.search.generation += 1;
+        let generation = self.search.generation;
+        self.search.query = query.clone();
+        self.search.error = None;
+        if query.trim().is_empty() {
+            self.search.results.clear();
+            self.search.loading = false;
+            cx.notify();
+            return;
+        }
+        self.search.loading = true;
+        cx.notify();
+        let request = cx.background_spawn(async move { models::search(query.trim()) });
+        cx.spawn(async move |this, cx| {
+            let found = request.await;
+            this.update(cx, |this, cx| {
+                if this.search.generation != generation {
+                    return;
+                }
+                this.search.loading = false;
+                match found {
+                    Ok(results) => this.search.results = results,
+                    Err(error) => {
+                        log::warn!("models: search failed: {error:#}");
+                        this.search.results.clear();
+                        this.search.error = Some(format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Lists a repository's GGUF files, once, for choosing a quantization.
+    pub fn open_repository(&mut self, repo: String, cx: &mut Context<Self>) {
+        if matches!(
+            self.search.files.get(&repo),
+            Some(Files::Loading | Files::Loaded(_))
+        ) {
+            return;
+        }
+        self.search.files.insert(repo.clone(), Files::Loading);
+        cx.notify();
+        let listed = repo.clone();
+        let request = cx.background_spawn(async move { models::repository_files(&listed) });
+        cx.spawn(async move |this, cx| {
+            let files = request.await;
+            this.update(cx, |this, cx| {
+                let files = match files {
+                    Ok(files) => Files::Loaded(files),
+                    Err(error) => Files::Failed(format!("{error:#}")),
+                };
+                this.search.files.insert(repo, files);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 

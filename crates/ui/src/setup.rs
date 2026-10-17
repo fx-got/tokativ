@@ -10,15 +10,16 @@ use gpui::{
 use std::time::Instant;
 
 use tokativ_audio::{InputDevice, Levels, Recorder};
-use tokativ_config::Model;
+use tokativ_engine::ModelId;
 use ui::{
     ActiveTheme as _, Button, Input, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller, Text,
 };
 
 use crate::chrome::{self, meter};
 use crate::desktop::{self, Bound, Desktop};
-use crate::host::{Action, Host, Library, ModelState, Status, Store};
-use crate::settings::{device_menu, model_row};
+use crate::host::{Action, Host, Library, Status, Store};
+use crate::models;
+use crate::settings::device_menu;
 
 /// Names the step the setup window opens on, for working on one step in the sandbox.
 pub const STEP_VARIABLE: &str = "TOKATIV_SETUP_STEP";
@@ -293,41 +294,42 @@ impl Setup {
     }
 
     fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let library = self.library.read(cx);
-        let states: Vec<(Model, ModelState)> = Model::ALL
-            .into_iter()
-            .map(|model| (model, library.state(model)))
-            .collect();
-        let chosen = self.store.read(cx).config().model;
+        let chosen = ModelId::parse(&self.store.read(cx).config().model);
+        let listed = models::listed(self.library.read(cx), chosen.as_slice());
 
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(intro(
-                "Pick the model to dictate with. It runs on this computer and nothing you say leaves it. You can download another one later in settings.",
+                "Pick the model to dictate with. It runs on this computer and nothing you say leaves it. Settings can find more on Hugging Face.",
                 cx,
             ))
-            .children(states.into_iter().map(|(model, state)| {
-                let radio = Radio::new(
-                    SharedString::from(format!("pick-{}", model.id())),
-                    model == chosen,
-                )
-                .into_any_element();
+            .children(listed.into_iter().map(|model| {
+                let id = model.id.clone();
+                let picked = Some(&id) == chosen.as_ref();
+                let radio = Radio::new(SharedString::from(format!("pick-{}", id.key())), picked)
+                    .into_any_element();
+                let key = id.key();
+                let choose = cx.listener(move |this, _, _, cx| {
+                    let key = key.clone();
+                    this.store
+                        .update(cx, |store, cx| store.update(|config| config.model = key, cx));
+                });
                 div()
-                    .id(SharedString::from(format!("setup-model-{}", model.id())))
-                    .cursor_pointer()
                     .rounded(chrome::GROUP_RADIUS)
                     .border_1()
-                    .border_color(match model == chosen {
+                    .border_color(match picked {
                         true => cx.theme().foreground.opacity(0.5),
                         false => cx.theme().border.opacity(0.6),
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store
-                            .update(cx, |store, cx| store.update(|config| config.model = model, cx));
-                    }))
-                    .child(model_row(model, state, &self.library, Some(radio), cx))
+                    .child(models::model_row(
+                        model,
+                        &self.library,
+                        Some(radio),
+                        Some(Box::new(choose)),
+                        cx,
+                    ))
             }))
     }
 
@@ -512,10 +514,8 @@ impl Setup {
 
     fn can_advance(&self, cx: &App) -> bool {
         match self.step {
-            Step::Models => self
-                .library
-                .read(cx)
-                .installed(self.store.read(cx).config().model),
+            Step::Models => ModelId::parse(&self.store.read(cx).config().model)
+                .is_some_and(|id| self.library.read(cx).installed(&id)),
             _ => true,
         }
     }

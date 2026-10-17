@@ -6,14 +6,16 @@ use gpui::{
     AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Task, Window,
     WindowHandle, div, px,
 };
-use tokativ_config::{Backend, Config, Model, PillEdge};
+use tokativ_config::{Backend, Config, PillEdge, Processor};
+use tokativ_engine::ModelId;
 use ui::{
-    ActiveTheme as _, Button, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller,
+    ActiveTheme as _, Input, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller,
     Scrubber, ScrubberState, Switch, Text,
 };
 
-use crate::chrome::{self, group, meter, row};
-use crate::host::{Host, Library, ModelState, Status, Store};
+use crate::chrome::{self, group, row};
+use crate::host::{Host, Library, Status, Store};
+use crate::models;
 use crate::usage::{Sampler, Usage};
 
 const WIDTH: f32 = 640.;
@@ -27,6 +29,8 @@ const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
 const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The tallest the microphone menu grows before it scrolls, about seven rows.
 const DEVICE_MENU_HEIGHT: gpui::Pixels = px(300.);
+/// How long typing must pause before the search goes out.
+const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(350);
 
 struct Open(WindowHandle<Settings>);
 
@@ -79,6 +83,12 @@ pub struct Settings {
     device_scrollbar: Entity<Scrollbar>,
     usage: Usage,
     _sampling: Task<()>,
+    search_input: Entity<Input>,
+    /// The query last sent, so a notify that did not change the text does not search again.
+    searched: String,
+    /// The search result whose files are listed.
+    opened: Option<String>,
+    _debounce: Option<Task<()>>,
 }
 
 impl Settings {
@@ -88,6 +98,12 @@ impl Settings {
         cx.observe(&host.store, |_, _, cx| cx.notify()).detach();
         cx.observe(&host.library, |_, _, cx| cx.notify()).detach();
         cx.observe(&host.status, |_, _, cx| cx.notify()).detach();
+        let search_input =
+            cx.new(|cx| Input::new("Search Hugging Face", cx).icon("icons/search.svg"));
+        cx.observe(&search_input, |this: &mut Self, _, cx| {
+            this.query_changed(cx)
+        })
+        .detach();
         cx.observe_window_appearance(window, |_, _, cx| {
             crate::refresh_theme(cx);
             cx.notify();
@@ -105,6 +121,10 @@ impl Settings {
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             usage: Usage::default(),
+            search_input,
+            searched: String::new(),
+            opened: None,
+            _debounce: None,
             _sampling: cx.spawn(async move |this, cx| {
                 let mut sampler = Sampler::default();
                 loop {
@@ -410,7 +430,6 @@ impl Settings {
         )
     }
 
-    /// The models to choose from. Clicking a downloaded one makes it the one sessions use.
     /// The daemon's own memory and processor use, refreshed every second.
     fn resources(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -448,37 +467,116 @@ impl Settings {
         )
     }
 
+    /// The models to choose from, with the device they run on. Clicking an installed model makes
+    /// it the one sessions use.
     fn models(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let library = self.library.read(cx);
-        let rows: Vec<_> = Model::ALL
+        let chosen = ModelId::parse(&config.model);
+        let listed = models::listed(self.library.read(cx), chosen.as_slice());
+        let mut rows: Vec<AnyElement> = listed
             .into_iter()
-            .map(|model| (model, library.state(model)))
+            .map(|model| {
+                let id = model.id.clone();
+                let radio = Radio::new(
+                    SharedString::from(format!("use-{}", id.key())),
+                    Some(&id) == chosen.as_ref(),
+                )
+                .into_any_element();
+                let key = id.key();
+                let choose = cx.listener(move |this, _, _, cx| {
+                    let key = key.clone();
+                    this.edit(cx, |config| config.model = key);
+                });
+                models::model_row(
+                    model,
+                    &self.library,
+                    Some(radio),
+                    Some(Box::new(choose)),
+                    cx,
+                )
+            })
             .collect();
-        let chosen = config.model;
-        group(
-            "Model",
-            rows.into_iter()
-                .map(|(model, state)| {
-                    let installed = matches!(state, ModelState::Installed { .. });
-                    let radio = Radio::new(
-                        SharedString::from(format!("use-{}", model.id())),
-                        model == chosen,
-                    )
-                    .into_any_element();
-                    div()
-                        .id(SharedString::from(format!("model-{}", model.id())))
-                        .when(installed, |this| {
-                            this.cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.edit(cx, |config| config.model = model);
-                                }))
-                        })
-                        .child(model_row(model, state, &self.library, Some(radio), cx))
-                        .into_any_element()
-                })
-                .collect(),
-            cx,
-        )
+
+        let processor = config.processor;
+        let device = self.status.read(cx).device.clone();
+        let detail = match device {
+            Some(device) => format!("Running on {device}."),
+            None => "The graphics card is used through Vulkan when there is one.".to_string(),
+        };
+        let picker = Picker::new("processor", &self.popovers, processor.name())
+            .width(Picker::REGULAR)
+            .items(Processor::ALL.into_iter().map(|choice| {
+                MenuItem::new(
+                    SharedString::from(format!("processor-{choice:?}")),
+                    choice.name(),
+                )
+                .selected(choice == processor)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| config.processor = choice);
+                }))
+            }));
+        rows.push(row("Run on", detail, picker.into_any_element(), cx).into_any_element());
+        group("Model", rows, cx)
+    }
+
+    /// Search over Hugging Face for any model the engine can run.
+    fn find(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let library = self.library.read(cx);
+        let search = &library.search;
+        let mut rows = vec![
+            div()
+                .px(chrome::GROUP_PADDING)
+                .py_3()
+                .child(self.search_input.clone())
+                .into_any_element(),
+        ];
+        if search.query.trim().is_empty() {
+            rows.push(models::note(
+                "Search Hugging Face for speech models in GGUF form. Whisper, Parakeet, Canary, GigaAM, Moonshine, Qwen3-ASR and Voxtral all run here.",
+                cx,
+            ));
+        } else if search.loading && search.results.is_empty() {
+            rows.push(models::note("Searching", cx));
+        } else if let Some(error) = &search.error {
+            rows.push(models::note(&format!("Search failed: {error}"), cx));
+        } else if search.results.is_empty() {
+            rows.push(models::note("No models that run here match that.", cx));
+        }
+        let results = search.results.clone();
+        rows.extend(results.iter().map(|repository| {
+            let open = self.opened.as_deref() == Some(repository.id.as_str());
+            let repo = repository.id.clone();
+            let toggle = cx.listener(move |this, _, _, cx| {
+                let repo = repo.clone();
+                if this.opened.as_deref() == Some(repo.as_str()) {
+                    this.opened = None;
+                } else {
+                    this.library
+                        .update(cx, |library, cx| library.open_repository(repo.clone(), cx));
+                    this.opened = Some(repo);
+                }
+                cx.notify();
+            });
+            models::repository_row(repository, open, &self.library, Box::new(toggle), cx)
+        }));
+        group("Find models", rows, cx)
+    }
+
+    /// Searches once typing pauses, so each keystroke does not reach the network.
+    fn query_changed(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).text().to_owned();
+        if query == self.searched {
+            return;
+        }
+        self.searched = query.clone();
+        self._debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_PAUSE).await;
+            this.update(cx, |this, cx| {
+                this.opened = None;
+                this.library
+                    .update(cx, |library, cx| library.search(query, cx));
+            })
+            .ok();
+        }));
     }
 
     /// The window's opening: the app's mark and name.
@@ -516,123 +614,6 @@ impl Settings {
     }
 }
 
-/// One model's row: its name and maker, what it is good at, where it stands on disk, and the
-/// button that changes that. `leading` goes in front, a radio or a checkbox.
-pub(crate) fn model_row(
-    model: Model,
-    state: ModelState,
-    library: &Entity<Library>,
-    leading: Option<AnyElement>,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.theme();
-    let download = tokativ_engine::models::download_size(model);
-    let (status, progress) = match &state {
-        ModelState::Missing => (format!("{} download", chrome::size(download)), None),
-        ModelState::Downloading { done, total } => {
-            let total = (*total).max(1);
-            (
-                format!(
-                    "Downloading, {} of {}",
-                    chrome::size(*done),
-                    chrome::size(total)
-                ),
-                Some(*done as f32 / total as f32),
-            )
-        }
-        ModelState::Installed { bytes } => (format!("{} on disk", chrome::size(*bytes)), None),
-        ModelState::Failed(error) => (format!("Download failed: {error}"), None),
-    };
-    let id = model.id();
-    let action = {
-        let library = library.clone();
-        match state {
-            ModelState::Downloading { .. } => {
-                Button::new(SharedString::from(format!("cancel-{id}")))
-                    .label("Cancel")
-                    .small()
-                    .outline()
-                    .on_click(move |_, _, cx| {
-                        library.update(cx, |library, _| library.cancel(model))
-                    })
-            }
-            ModelState::Installed { .. } => Button::new(SharedString::from(format!("delete-{id}")))
-                .label("Delete")
-                .small()
-                .outline()
-                .on_click(move |_, _, cx| {
-                    library.update(cx, |library, cx| library.delete(model, cx))
-                }),
-            ModelState::Missing | ModelState::Failed(_) => {
-                Button::new(SharedString::from(format!("download-{id}")))
-                    .label("Download")
-                    .small()
-                    .primary()
-                    .on_click(move |_, _, cx| {
-                        library.update(cx, |library, cx| library.download(model, cx))
-                    })
-            }
-        }
-    };
-    let small = theme.text(Text::Small);
-    div()
-        .flex()
-        .items_start()
-        .gap_3()
-        .px(chrome::GROUP_PADDING)
-        .py_3()
-        .when_some(leading, |this, leading| {
-            this.child(div().flex_none().pt(px(2.)).child(leading))
-        })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap_2()
-                        .child(model.name())
-                        .child(
-                            div()
-                                .text_size(small)
-                                .text_color(theme.muted_foreground)
-                                .child(model.maker()),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(small)
-                        .text_color(theme.muted_foreground)
-                        .child(model.summary()),
-                )
-                .child(match progress {
-                    Some(progress) => div()
-                        .pt_1()
-                        .child(meter(progress, px(6.), cx))
-                        .into_any_element(),
-                    None => div()
-                        .text_size(small)
-                        .text_color(theme.muted_foreground.opacity(0.75))
-                        .child(status.clone())
-                        .into_any_element(),
-                })
-                .when(progress.is_some(), |this| {
-                    this.child(
-                        div()
-                            .text_size(small)
-                            .text_color(theme.muted_foreground)
-                            .child(status),
-                    )
-                }),
-        )
-        .child(div().flex_none().child(action))
-}
-
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let config = self.store.read(cx).config().clone();
@@ -653,6 +634,7 @@ impl Render for Settings {
                         .gap_4()
                         .child(self.header(cx))
                         .child(self.models(&config, cx))
+                        .child(self.find(cx))
                         .child(self.dictation(&config, cx))
                         .child(self.detection(&config, cx))
                         .child(self.insertion(&config, cx))

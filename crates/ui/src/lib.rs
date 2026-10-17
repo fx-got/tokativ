@@ -4,6 +4,7 @@
 mod chrome;
 mod desktop;
 mod host;
+mod models;
 pub mod pill;
 mod radius;
 pub mod settings;
@@ -13,7 +14,7 @@ mod usage;
 use gpui::App;
 use ui::{Look, Rounding, Theme, ThemeKind};
 
-pub use host::{Action, Host, Library, ModelState, Status, Store, entities};
+pub use host::{Action, Files, Host, Library, ModelState, Status, Store, entities};
 pub use pill::{Phase, Pill};
 pub use radius::nested_radius;
 
