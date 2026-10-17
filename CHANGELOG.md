@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-17
+
 ### Added
 
 - Windows installers through Inno Setup for x86_64 and ARM64, with per-user installation,
@@ -86,7 +88,8 @@ focused app as you speak.
 - A tray icon and a `tokativ` command line control the daemon.
 - The Home Manager module runs Tokativ as a user service and can fetch models at build time.
 
-[unreleased]: https://github.com/nolight132/tokativ/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/nolight132/tokativ/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/nolight132/tokativ/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nolight132/tokativ/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nolight132/tokativ/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nolight132/tokativ/releases/tag/v0.1.0
