@@ -7,7 +7,7 @@ focused app as you speak.
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-2b2b33?style=flat-square)](COPYING)
 [![Rust](https://img.shields.io/badge/rust-1.98-2b2b33?style=flat-square&logo=rust)](rust-toolchain.toml)
-[![Wayland](https://img.shields.io/badge/wayland-%E2%99%A1-2b2b33?style=flat-square&logo=wayland)](#use)
+[![Wayland](https://img.shields.io/badge/wayland-%E2%99%A1-2b2b33?style=flat-square&logo=wayland)](#install)
 [![Nix](https://img.shields.io/badge/nix-flake-2b2b33?style=flat-square&logo=nixos)](#install)
 [![Platforms](https://img.shields.io/badge/runs%20on-linux%20%7C%20macos%20%7C%20windows-2b2b33?style=flat-square)](#install)
 
@@ -26,8 +26,7 @@ focused app as you speak.
 Speech is recognized on your machine by [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp),
 on the graphics card through Vulkan, or Metal on macOS, or on the CPU. Nothing is downloaded until
 you pick a model: Parakeet is the recommended one, and settings can search Hugging Face for any
-other GGUF model. Whisper and Qwen3-ASR also take a vocabulary of names and terms to spell as
-written, and follow the text before each phrase.
+other GGUF model.
 
 ## Install
 
@@ -55,36 +54,8 @@ builds for all three platforms:
 - **Linux:** download the binary, make it executable, and put it on your `PATH` as `tokativ`.
   It needs glibc 2.35+, the Vulkan loader, Wayland, libxkbcommon and alsa-lib.
 
-## Use
-
-The first press of the hotkey starts dictating, the second inserts the rest. Enter finishes and
-Escape cancels.
-
-On Linux, bind `tokativ toggle` to a key in your compositor. It needs one with layer shell, so niri,
-Hyprland, Sway, river or KDE Plasma, not GNOME.
-
-On macOS and Windows, Tokativ listens for the hotkey itself: Option+Space on macOS, Ctrl+Alt+Space
-on Windows. To change it, click the hotkey in settings and press the new one. A function key such
-as F5 works on its own, any other key needs a modifier. macOS asks for Accessibility access the
-first time Tokativ types, and the text only arrives once it is allowed. Neither system lets another
-app put a draft at the cursor, so the text appears once each phrase is done.
-
-On every platform, **Settings → General → Live caption** adds a larger floating window with the
-current draft and the latest dictated text. It sits below a top pill or above a bottom pill,
-and lets clicks through to the app underneath. It is on by default on macOS and Windows.
-
-**Settings → Writing style → Spoken emoji** replaces names such as “thumbs up emoji” with 👍
-and “эмодзи красное сердце” with ❤️. It is on by default, works offline, and recognizes the full
-Unicode 17 emoji catalogue with names in 140+ languages, including flags and skin tones.
-Say “emoji” or its local equivalent (such as “эмодзи”, “絵文字” or “이모지”) before or after the name.
-Names without an emoji command remain ordinary text.
-
-**Settings → General → Theme** follows the system or stays dark or light. Custom themes are JSON
-files in the themes folder that the settings open, in the same format as Sonora's, so a Sonora
-theme works as it is. The same page can hide the pill's cancel and confirm buttons.
-
-Windows and macOS check for updates and show a popup when a new version is available. You can
-also check from the tray menu or **Settings → General**. Updates keep your settings and models.
+On Linux, Tokativ needs a compositor with layer shell, such as niri, Hyprland, Sway, river or KDE
+Plasma. GNOME does not work. The first start opens a setup window that walks through the rest.
 
 ## Build from source
 
