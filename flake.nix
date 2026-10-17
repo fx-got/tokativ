@@ -13,6 +13,22 @@
       ];
       forEachSystem = fn: lib.genAttrs systems (system: fn nixpkgs.legacyPackages.${system});
 
+      # The release the default package installs. Each hash is the SRI form of the asset's line in
+      # that release's SHA256SUMS.
+      release = {
+        version = "0.1.0";
+        assets = {
+          x86_64-linux = {
+            target = "x86_64-unknown-linux-gnu";
+            hash = "sha256-dxuxo54rAxI+ka1IMv8rcYciYUZLm+Fddd678F7i5gI=";
+          };
+          aarch64-linux = {
+            target = "aarch64-unknown-linux-gnu";
+            hash = "sha256-EJuirB6OfpQ3mxL5FoQSAlp1YTWqOK2vvpTWN5O0Jsc=";
+          };
+        };
+      };
+
       runtimeLibraries =
         pkgs: with pkgs; [
           vulkan-loader
@@ -25,9 +41,12 @@
         ];
     in
     {
+      # `default` and `tokativ` are the released binary. `tokativ-source` builds this checkout.
       packages = forEachSystem (pkgs: rec {
-        tokativ = pkgs.callPackage ./nix/package.nix { };
-        default = tokativ;
+        tokativ-source = pkgs.callPackage ./nix/package.nix { };
+        tokativ-bin = pkgs.callPackage ./nix/package-bin.nix { inherit release tokativ-source; };
+        tokativ = tokativ-bin;
+        default = tokativ-bin;
       });
 
       devShells = forEachSystem (pkgs: {
