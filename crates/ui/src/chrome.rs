@@ -86,9 +86,6 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
         .text_color(theme.foreground)
         .bg(theme.background)
         .rounded(radius)
-        .when(radius > Pixels::ZERO, |this| {
-            this.border_1().border_color(theme.border)
-        })
         .overflow_hidden()
         // Middle-button auto-scrolling, wired the way Sonora's root wires it: any press ends the
         // mode, a held middle drag ends on release, Escape ends it, and the pointer steers it.
