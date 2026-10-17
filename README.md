@@ -30,6 +30,10 @@ other GGUF model.
 
 ## Install
 
+On every platform, the first start opens a setup window that walks through the rest.
+
+### Linux
+
 ```sh
 nix run github:nolight132/tokativ
 ```
@@ -41,21 +45,29 @@ imports = [ inputs.tokativ.homeModules.default ];
 services.tokativ.enable = true;
 ```
 
-On Linux both install the released binary; `nix run github:nolight132/tokativ#tokativ-source`
-builds from source. On Apple silicon Macs, Nix builds from source and Home Manager runs it as a
+Both install the released binary; `nix run github:nolight132/tokativ#tokativ-source` builds from
+source. Without Nix, download the binary from the
+[latest release](https://github.com/nolight132/tokativ/releases/latest), make it executable and
+put it on your `PATH` as `tokativ`. It needs glibc 2.35+, the Vulkan loader, Wayland, libxkbcommon
+and alsa-lib.
+
+Tokativ needs a compositor with layer shell, such as niri, Hyprland, Sway, river or KDE Plasma.
+GNOME does not work.
+
+### macOS
+
+Download the `.app.tar.gz` for Intel or Apple silicon from the
+[latest release](https://github.com/nolight132/tokativ/releases/latest), extract it, and move
+Tokativ to Applications. Open it from the context menu on first launch; builds are not notarized.
+
+On Apple silicon, the Nix commands above build from source, and Home Manager runs Tokativ as a
 launchd agent.
 
-The [latest release](https://github.com/nolight132/tokativ/releases/latest) has x86_64 and ARM64
-builds for all three platforms:
+### Windows
 
-- **Windows:** run the `-setup.exe` installer for your architecture. A portable `.exe` is also available.
-- **macOS:** download the `.app.tar.gz` for Intel or Apple silicon, extract it, and move Tokativ
-  to Applications. Open it from the context menu on first launch; builds are not notarized.
-- **Linux:** download the binary, make it executable, and put it on your `PATH` as `tokativ`.
-  It needs glibc 2.35+, the Vulkan loader, Wayland, libxkbcommon and alsa-lib.
-
-On Linux, Tokativ needs a compositor with layer shell, such as niri, Hyprland, Sway, river or KDE
-Plasma. GNOME does not work. The first start opens a setup window that walks through the rest.
+Run the `-setup.exe` installer for your architecture from the
+[latest release](https://github.com/nolight132/tokativ/releases/latest). A portable `.exe` is
+also there.
 
 ## Build from source
 
