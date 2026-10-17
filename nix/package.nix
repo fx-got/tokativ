@@ -8,6 +8,7 @@
   autoPatchelfHook,
   openssl,
   shaderc,
+  spirv-headers,
   vulkan-headers,
   alsa-lib,
   alsa-plugins,
@@ -73,6 +74,7 @@ rustPlatform.buildRustPackage {
 
   buildInputs = [
     openssl
+    spirv-headers
     vulkan-headers
     vulkan-loader
     alsa-lib

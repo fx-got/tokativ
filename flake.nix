@@ -40,6 +40,7 @@
           ];
           buildInputs = runtimeLibraries pkgs ++ [
             pkgs.openssl
+            pkgs.spirv-headers
             pkgs.vulkan-headers
           ];
           LD_LIBRARY_PATH = lib.makeLibraryPath (runtimeLibraries pkgs);
