@@ -38,6 +38,7 @@ const MAX_WORDS: usize = 128;
 /// The caption itself unfolding towards the pill and folding back.
 const FOLDED_SCALE: f32 = 0.9;
 const FOLDED_SHIFT: Pixels = px(10.);
+const FOLDED_BLUR: Pixels = px(8.);
 const INK: SpringConfig = SpringConfig::new(160., 27., 1.);
 const REVEAL: SpringConfig = SpringConfig::new(300., 35., 1.);
 const NEW_WORD_BLUR: Pixels = px(6.);
@@ -333,6 +334,7 @@ impl Render for Caption {
                     ))
                     .layer_translate(point(px(0.), towards_pill * (1. - shown)))
             })
+            .when(shown < 1., |this| this.blur(FOLDED_BLUR * (1. - shown)))
             .child(
                 // Scroll before painting/clipping, so incoming lines are rendered throughout
                 // the motion. A composited translation would only move already visible pixels.
