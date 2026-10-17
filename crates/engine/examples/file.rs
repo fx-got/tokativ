@@ -50,7 +50,7 @@ fn main() -> Result<()> {
         _ => Processor::Auto,
     };
     let mut engine = Gguf::load(&model, processor)?;
-    println!("running on {}", engine.device());
+    println!("running on {}", engine.device().name);
     let mut joiner = Joiner::new(None, true);
     for segment in segments {
         let started = Instant::now();

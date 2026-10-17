@@ -17,7 +17,7 @@ use ui::{
 };
 
 use crate::chrome::{self, group, row};
-use crate::host::{Files, Host, Library, Status, Store};
+use crate::host::{Files, Host, Library, ModelState, Status, Store};
 use crate::models;
 use crate::usage::{Sampler, Usage};
 
@@ -531,7 +531,7 @@ impl Settings {
                 .into_any_element(),
                 row(
                     "Unload models",
-                "Frees about a gigabyte of memory between sessions, at the cost of a slower start.",
+                "Frees the model's memory between sessions, on the graphics card or in RAM. The next session waits a moment while it loads.",
                 idle_picker.into_any_element(),
                 cx,
                 )
@@ -679,28 +679,49 @@ impl Settings {
                 .into_any_element()
         };
         let memory = chrome::size(self.usage.memory);
+        let device = self.status.read(cx).device.clone();
+        let on_gpu = device.as_ref().is_some_and(|device| device.gpu);
+        let weights =
+            ModelId::parse(&self.store.read(cx).config().model).and_then(|id| {
+                match self.library.read(cx).state(&id) {
+                    ModelState::Installed { bytes } => Some(bytes),
+                    _ => None,
+                }
+            });
+        let memory_detail = match on_gpu {
+            true => "The app itself. The model's weights sit on the graphics card instead.",
+            false => "The app and the model's weights, which run on the CPU.",
+        };
         let cpu = match self.usage.cpu {
             Some(cpu) => format!("{cpu:.0}% of a core"),
             None => "Measuring".to_string(),
         };
         group(
             "Resources",
-            vec![
-                row(
-                    "Memory",
-                    "Mostly the loaded models. Unloading them when idle frees it.",
-                    value(memory),
-                    cx,
-                )
-                .into_any_element(),
-                row(
-                    "Processor",
-                    "Over the last second. Close to nothing between sessions.",
-                    value(cpu),
-                    cx,
-                )
-                .into_any_element(),
-            ],
+            [
+                Some(row("Memory", memory_detail, value(memory), cx).into_any_element()),
+                weights.filter(|_| on_gpu).map(|bytes| {
+                    row(
+                        "Graphics memory",
+                        "About the size of the model's weights, while it is loaded.",
+                        value(format!("about {}", chrome::size(bytes))),
+                        cx,
+                    )
+                    .into_any_element()
+                }),
+                Some(
+                    row(
+                        "Processor",
+                        "Over the last second. Close to nothing between sessions.",
+                        value(cpu),
+                        cx,
+                    )
+                    .into_any_element(),
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
             cx,
         )
     }
@@ -737,7 +758,7 @@ impl Settings {
         let processor = config.processor;
         let device = self.status.read(cx).device.clone();
         let detail = match device {
-            Some(device) => format!("Running on {device}."),
+            Some(device) => format!("Running on {}.", device.name),
             None => "The graphics card is used through Vulkan when there is one.".to_string(),
         };
         let picker = Picker::new("processor", &self.popovers, processor.name())
@@ -1012,7 +1033,7 @@ impl Settings {
                         .px_2()
                         .text_size(theme.text(Text::Small))
                         .text_color(theme.muted_foreground)
-                        .child(format!("Running on {device}")),
+                        .child(format!("Running on {}", device.name)),
                 )
             })
     }

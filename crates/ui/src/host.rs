@@ -108,7 +108,7 @@ pub struct Status {
     pub note: Option<String>,
     pub recording: bool,
     /// The device the loaded model runs on, once one has loaded.
-    pub device: Option<String>,
+    pub device: Option<tokativ_engine::Device>,
 }
 
 /// Where one model stands on disk.

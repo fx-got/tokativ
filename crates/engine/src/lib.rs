@@ -27,8 +27,17 @@ pub trait Engine: Send {
     /// say.
     fn languages(&self) -> Vec<String>;
 
-    /// The device the model runs on, as the user would name it.
-    fn device(&self) -> String;
+    /// The device the model runs on.
+    fn device(&self) -> Device;
+}
+
+/// Where a model runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Device {
+    /// As the user would name it, such as the graphics card's model.
+    pub name: String,
+    /// A graphics card, whose own memory holds the weights.
+    pub gpu: bool,
 }
 
 /// Any model transcribe.cpp can load: Parakeet, GigaAM, Whisper, Canary and the rest.
@@ -65,7 +74,7 @@ impl Gguf {
             "engine: loaded {} ({}) on {} in {:.1?}",
             id.name(),
             engine.model.arch(),
-            engine.device(),
+            engine.device().name,
             started.elapsed()
         );
         Ok(engine)
@@ -87,10 +96,22 @@ impl Engine for Gguf {
             .unwrap_or_default()
     }
 
-    fn device(&self) -> String {
+    fn device(&self) -> Device {
         match self.model.device() {
-            Ok(device) if !device.description.is_empty() => device.description,
-            _ => self.model.backend(),
+            Ok(device) => Device {
+                name: match device.description.is_empty() {
+                    true => device.name,
+                    false => device.description,
+                },
+                gpu: matches!(
+                    device.device_type,
+                    transcribe_cpp::DeviceType::Gpu | transcribe_cpp::DeviceType::Igpu
+                ),
+            },
+            Err(_) => Device {
+                name: self.model.backend(),
+                gpu: false,
+            },
         }
     }
 }
@@ -119,7 +140,7 @@ enum Job {
 pub struct Transcriber {
     jobs: Sender<Job>,
     draft: Arc<Mutex<Option<Draft>>>,
-    device: Arc<Mutex<Option<String>>>,
+    device: Arc<Mutex<Option<Device>>>,
 }
 
 /// A transcription whose result is only shown, never kept. Only the newest one waits, so drafts
@@ -202,7 +223,7 @@ impl Transcriber {
     }
 
     /// The device the most recently loaded model runs on, once one has loaded.
-    pub fn device(&self) -> Option<String> {
+    pub fn device(&self) -> Option<Device> {
         self.device.lock().expect("device lock").clone()
     }
 }
@@ -210,7 +231,7 @@ impl Transcriber {
 struct Worker {
     jobs: Receiver<Job>,
     drafts: Arc<Mutex<Option<Draft>>>,
-    device: Arc<Mutex<Option<String>>>,
+    device: Arc<Mutex<Option<Device>>>,
     idle: Option<Duration>,
     processor: Processor,
     loaded: HashMap<ModelId, Gguf>,
