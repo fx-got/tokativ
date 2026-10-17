@@ -129,6 +129,10 @@ pub struct Setup {
     devices: Vec<InputDevice>,
     /// Feeds the level meter while the microphone step is shown.
     monitor: Option<Recorder>,
+    /// The step left by the last move, which tells the progress bar which way to animate.
+    from: Option<Step>,
+    /// Counts moves between steps.
+    moves: u32,
     desktop: Desktop,
     /// The binding found in the desktop's config, looked for again while the hotkey step shows.
     bound: Option<Bound>,
@@ -173,6 +177,8 @@ impl Setup {
             popovers: Popovers::default(),
             devices: tokativ_audio::input_devices(),
             monitor: None,
+            from: None,
+            moves: 0,
             desktop: Desktop::detect(),
             bound: None,
             pressed: false,
@@ -188,6 +194,8 @@ impl Setup {
     }
 
     fn go(&mut self, step: Step, window: &mut Window, cx: &mut Context<Self>) {
+        self.from = (self.moves > 0).then_some(self.step);
+        self.moves += 1;
         self.step = step;
         self.monitor = None;
         self._watching = None;
@@ -528,29 +536,41 @@ fn intro(text: &'static str, cx: &App) -> impl IntoElement {
         .child(text)
 }
 
-/// The step header: the step's icon, name and number, and a bar of one segment per step. The
-/// segment of the step just reached fills in as it appears.
-fn progress(step: Step, cx: &App) -> impl IntoElement {
+/// The step header: the step's icon, name and number, and a bar of one segment per step. Moving
+/// forward fills the new step's segment, moving back drains the segment of the step left.
+fn progress(step: Step, from: Option<Step>, moves: u32, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let index = step.index();
     let count = Step::ALL.len();
+    let back = from.is_some_and(|from| from.index() > index);
     let segments = Step::ALL.into_iter().map(move |each| {
-        let reached = each.index() <= index;
         let fill = move || div().h_full().rounded_full().bg(theme.progress_bar);
-        div()
+        // Each move gets fresh animation ids, so going back and forth replays the motion.
+        let animated = |id: &str, grow: bool| {
+            fill().with_animation(
+                SharedString::from(format!("segment-{id}-{moves}")),
+                Animation::new(FILL).with_easing(ui::ease_out_cubic),
+                move |fill, delta| match grow {
+                    true => fill.w(relative(delta)),
+                    false => fill.w(relative(1. - delta)),
+                },
+            )
+        };
+        let segment = div()
             .flex_1()
             .h(SEGMENT)
             .rounded_full()
             .bg(theme.muted)
-            .overflow_hidden()
-            .when(reached && each != step, |this| this.child(fill().w_full()))
-            .when(each == step, |this| {
-                this.child(fill().with_animation(
-                    SharedString::from(format!("segment-{}", each.index())),
-                    Animation::new(FILL).with_easing(ui::ease_out_cubic),
-                    |fill, delta| fill.w(relative(delta)),
-                ))
-            })
+            .overflow_hidden();
+        if each.index() < index || (each == step && back) {
+            segment.child(fill().w_full())
+        } else if each == step {
+            segment.child(animated("fill", true))
+        } else if back && Some(each) == from {
+            segment.child(animated("drain", false))
+        } else {
+            segment
+        }
     });
     div()
         .flex()
@@ -645,7 +665,7 @@ impl Render for Setup {
             .pb_6()
             .gap_4()
             .pt_4()
-            .child(progress(step, cx))
+            .child(progress(step, self.from, self.moves, cx))
             .child(
                 div()
                     .flex()
