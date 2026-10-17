@@ -96,6 +96,8 @@ pub struct Suggested {
     pub name: &'static str,
     pub maker: &'static str,
     pub summary: &'static str,
+    /// The one to take when unsure, marked as such in the lists.
+    pub recommended: bool,
 }
 
 pub const SUGGESTED: &[Suggested] = &[
@@ -104,24 +106,28 @@ pub const SUGGESTED: &[Suggested] = &[
         name: "Parakeet v3",
         maker: "NVIDIA",
         summary: "25 European languages, English and Russian among them. Tells them apart on its own.",
+        recommended: true,
     },
     Suggested {
         id: "handy-computer/gigaam-v3-e2e-ctc-gguf/gigaam-v3-e2e-ctc-Q8_0.gguf",
         name: "GigaAM v3",
         maker: "Sber",
         summary: "Russian only, punctuated. The most accurate for Russian speech.",
+        recommended: false,
     },
     Suggested {
         id: "handy-computer/whisper-large-v3-turbo-gguf/whisper-large-v3-turbo-Q8_0.gguf",
         name: "Whisper large v3 turbo",
         maker: "OpenAI",
         summary: "Around 100 languages. Slower than Parakeet, best with a graphics card.",
+        recommended: false,
     },
     Suggested {
         id: "handy-computer/canary-1b-v2-gguf/canary-1b-v2-Q8_0.gguf",
         name: "Canary 1B v2",
         maker: "NVIDIA",
         summary: "25 European languages with punctuation, a larger sibling of Parakeet.",
+        recommended: false,
     },
 ];
 

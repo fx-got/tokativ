@@ -27,8 +27,7 @@ in
       default = { };
       example = lib.literalExpression ''
         {
-          language = "auto";
-          engines.russian = "gigaam";
+          style.final_period = false;
           vad.silence_ms = 600;
           pill.margin = 64;
         }
@@ -48,10 +47,7 @@ in
         ]
       );
       default = [ ];
-      example = [
-        "parakeet"
-        "gigaam"
-      ];
+      example = [ "parakeet" ];
       description = ''
         Models to fetch at build time and link into {file}`$XDG_DATA_HOME/tokativ/models`,
         instead of downloading them from the setup window.

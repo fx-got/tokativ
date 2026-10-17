@@ -17,6 +17,7 @@ pub(crate) struct Described {
     pub name: String,
     pub maker: Option<String>,
     pub summary: Option<String>,
+    pub recommended: bool,
 }
 
 impl Described {
@@ -28,12 +29,14 @@ impl Described {
                 name: suggested.name.to_owned(),
                 maker: Some(suggested.maker.to_owned()),
                 summary: Some(suggested.summary.to_owned()),
+                recommended: suggested.recommended,
                 id,
             },
             None => Self {
                 name: id.name(),
                 maker: None,
                 summary: Some(id.repo.clone()),
+                recommended: false,
                 id,
             },
         }
@@ -159,7 +162,8 @@ pub(crate) fn model_row(
                                     .text_color(theme.muted_foreground)
                                     .child(maker),
                             )
-                        }),
+                        })
+                        .when(model.recommended, |this| this.child(tag("Recommended", cx))),
                 )
                 .when_some(model.summary, |this, summary| {
                     this.child(
@@ -181,6 +185,18 @@ pub(crate) fn model_row(
         )
         .child(div().flex_none().child(action))
         .into_any_element()
+}
+
+/// A small label beside a model's name.
+fn tag(text: &'static str, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .px_1p5()
+        .rounded(theme.radius)
+        .bg(theme.secondary)
+        .text_size(theme.text(Text::Tiny))
+        .text_color(theme.foreground.opacity(0.8))
+        .child(text)
 }
 
 /// The height of every row in the virtualized search lists. A uniform list only draws the rows
