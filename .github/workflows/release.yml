@@ -117,6 +117,7 @@ jobs:
           cp COPYING licenses/LICENSE
           cp assets/fonts/LICENSE.txt licenses/LICENSE.Inter
           cp assets/silero/LICENSE licenses/LICENSE.silero-vad
+          cp assets/icons/LICENSE licenses/LICENSE.lucide
           tar -czf "dist/tokativ-$VERSION-licenses.tar.gz" -C licenses .
 
       - name: checksums

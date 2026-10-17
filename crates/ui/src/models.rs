@@ -213,6 +213,7 @@ pub(crate) fn result_row(repository: &Repository, open: Choose, cx: &App) -> Any
         .unwrap_or(("", repository.id.as_str()));
     div()
         .id(SharedString::from(format!("repo-{}", repository.id)))
+        .w_full()
         .h(LIST_ROW)
         .flex()
         .items_center()
@@ -250,12 +251,7 @@ pub(crate) fn result_row(repository: &Repository, open: Choose, cx: &App) -> Any
                                 .child(owner.to_owned()),
                         ),
                 )
-                .child(
-                    div()
-                        .text_size(small)
-                        .text_color(theme.muted_foreground)
-                        .child(facts(repository)),
-                ),
+                .child(facts(repository, cx)),
         )
         .child(
             gpui::svg()
@@ -267,14 +263,37 @@ pub(crate) fn result_row(repository: &Repository, open: Choose, cx: &App) -> Any
         .into_any_element()
 }
 
-/// The architecture and popularity of a repository, in one line.
-pub(crate) fn facts(repository: &Repository) -> String {
-    format!(
-        "{}  ·  {} downloads  ·  {} likes",
-        repository.architecture.as_deref().unwrap_or("unknown"),
-        count(repository.downloads),
-        count(repository.likes)
-    )
+/// A repository's architecture and how often it was downloaded, in one muted line.
+pub(crate) fn facts(repository: &Repository, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(theme.text(Text::Small))
+        .text_color(theme.muted_foreground)
+        .child(
+            repository
+                .architecture
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+        )
+        .child("·")
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    gpui::svg()
+                        .path(crate::DOWNLOAD_ICON)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(count(repository.downloads)),
+        )
+        .into_any_element()
 }
 
 /// One GGUF file of a repository: its quantization and size, where it stands, and the button
@@ -335,6 +354,7 @@ pub(crate) fn file_row(
         }
     };
     div()
+        .w_full()
         .h(LIST_ROW)
         .flex()
         .items_center()

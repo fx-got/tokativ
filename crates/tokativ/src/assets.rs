@@ -1,4 +1,5 @@
-//! The assets GPUI loads: Sonora's icon packs and the Inter faces the UI is set in.
+//! The assets GPUI loads: Sonora's icon packs, the icons Tokativ adds to them, and the Inter faces
+//! the UI is set in.
 
 use std::borrow::Cow;
 
@@ -12,6 +13,12 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/Inter-Bold.ttf"),
 ];
 
+/// Icons Sonora's packs lack, by the path the UI draws them with.
+const ICONS: &[(&str, &[u8])] = &[(
+    tokativ_ui::DOWNLOAD_ICON,
+    include_bytes!("../../../assets/icons/download.svg"),
+)];
+
 pub struct Assets;
 
 impl Assets {
@@ -23,7 +30,11 @@ impl Assets {
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(icons::asset(path).map(Cow::Borrowed))
+        let own = ICONS
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(_, bytes)| *bytes);
+        Ok(own.or_else(|| icons::asset(path)).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {

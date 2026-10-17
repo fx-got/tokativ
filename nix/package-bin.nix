@@ -69,6 +69,7 @@ stdenv.mkDerivation {
     install -Dm444 ${../COPYING} "$out/share/licenses/tokativ/LICENSE"
     install -Dm444 ${../assets/fonts/LICENSE.txt} "$out/share/licenses/tokativ/LICENSE.Inter"
     install -Dm444 ${../assets/silero/LICENSE} "$out/share/licenses/tokativ/LICENSE.silero-vad"
+    install -Dm444 ${../assets/icons/LICENSE} "$out/share/licenses/tokativ/LICENSE.lucide"
     runHook postInstall
   '';
 

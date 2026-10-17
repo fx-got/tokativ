@@ -16,7 +16,7 @@ use ui::{
     Scrubber, ScrubberState, Switch, Text,
 };
 
-use crate::chrome::{self, group, row};
+use crate::chrome::{self, group, row, setting};
 use crate::host::{Files, Host, Library, ModelState, Status, Store};
 use crate::models;
 use crate::usage::{Sampler, Usage};
@@ -24,8 +24,6 @@ use crate::usage::{Sampler, Usage};
 const WIDTH: f32 = 920.;
 const HEIGHT: f32 = 720.;
 const SIDEBAR: gpui::Pixels = px(220.);
-/// The widest the page content grows, so rows stay readable in a wide window.
-const CONTENT: f32 = 720.;
 /// The ranges the sliders cover.
 const SILENCE_MS: (f32, f32) = (200., 2000.);
 const THRESHOLD: (f32, f32) = (0.2, 0.9);
@@ -118,18 +116,6 @@ impl Page {
             Self::Typing => "Typing",
             Self::Pill => "Pill",
             Self::System => "System",
-        }
-    }
-
-    fn subtitle(self) -> &'static str {
-        match self {
-            Self::Model => "The speech model sessions dictate with, and where it runs.",
-            Self::Find => "Speech models on Hugging Face that run here.",
-            Self::Dictation => "What Tokativ listens to and when a phrase ends.",
-            Self::Style => "Rules that rewrite each phrase before it is typed.",
-            Self::Typing => "How text reaches the app you dictate into.",
-            Self::Pill => "Where the pill appears while you dictate.",
-            Self::System => "Startup, the tray and what Tokativ costs to run.",
         }
     }
 
@@ -293,22 +279,16 @@ impl Settings {
             }))
             .into_any_element();
         group(
-            "Dictation",
+            None,
             vec![
                 row(
                     "Live text",
-                    "Show a draft of each phrase at the cursor while you speak. Needs the input method.",
+                    "A draft at the cursor while you speak. Needs the input method.",
                     live_switch,
                     cx,
                 )
                 .into_any_element(),
-                row(
-                    "Microphone",
-                "Used from the next session on.",
-                device_picker.into_any_element(),
-                cx,
-                )
-                .into_any_element(),
+                setting("Microphone", device_picker.into_any_element(), cx).into_any_element(),
             ],
             cx,
         )
@@ -327,11 +307,10 @@ impl Settings {
         let threshold_value = value(threshold, THRESHOLD);
 
         group(
-            "Voice detection",
+            Some("Voice detection"),
             vec![
-                row(
+                setting(
                     "Pause length",
-                    "How long you pause before a phrase is transcribed and inserted.",
                     self.slider(
                         &self.silence,
                         silence,
@@ -347,7 +326,7 @@ impl Settings {
                 .into_any_element(),
                 row(
                     "Speech threshold",
-                    "Higher ignores more background noise but may clip quiet words.",
+                    "Higher ignores more noise but may clip quiet words.",
                     self.slider(
                         &self.threshold,
                         threshold,
@@ -412,10 +391,10 @@ impl Settings {
 
     fn insertion(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.status.read(cx);
-        let detail = match &status.note {
-            Some(note) => format!("Using {}, because {note}.", status.method.to_lowercase()),
-            None => format!("Using {}.", status.method.to_lowercase()),
-        };
+        let note = status
+            .note
+            .as_ref()
+            .map(|note| format!("Using {}, because {note}.", status.method.to_lowercase()));
         let backend = config.insertion.backend;
         let picker = Picker::new("backend", &self.popovers, backend.name())
             .width(Picker::REGULAR)
@@ -430,8 +409,11 @@ impl Settings {
                 }))
             }));
         group(
-            "Insertion",
-            vec![row("Method", detail, picker.into_any_element(), cx).into_any_element()],
+            None,
+            vec![match note {
+                Some(note) => row("Method", note, picker.into_any_element(), cx).into_any_element(),
+                None => setting("Method", picker.into_any_element(), cx).into_any_element(),
+            }],
             cx,
         )
     }
@@ -456,18 +438,11 @@ impl Settings {
             .unwrap_or_else(|| fraction(config.pill.margin, MARGIN));
         let pixels = value(margin, MARGIN).round();
         group(
-            "Pill",
+            None,
             vec![
-                row(
-                    "Position",
-                    "The edge of the focused screen the pill appears on.",
-                    picker.into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
-                row(
+                setting("Position", picker.into_any_element(), cx).into_any_element(),
+                setting(
                     "Distance from the edge",
-                    "Measured to the pill itself.",
                     self.slider(
                         &self.margin,
                         margin,
@@ -505,35 +480,34 @@ impl Settings {
                 }))
             }));
         group(
-            "System",
+            None,
             vec![
                 row(
                     "Launch at login",
-                "Adds an autostart entry. Not needed with the Home Manager service.",
-                Switch::new("login", login)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.launch_at_login = !login);
-                    }))
-                    .into_any_element(),
-                cx,
+                    "Not needed with the Home Manager service.",
+                    Switch::new("login", login)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.launch_at_login = !login);
+                        }))
+                        .into_any_element(),
+                    cx,
                 )
                 .into_any_element(),
-                row(
+                setting(
                     "Tray icon",
-                "Start, stop and switch language from the panel.",
-                Switch::new("tray", tray)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.tray = !tray);
-                    }))
-                    .into_any_element(),
-                cx,
+                    Switch::new("tray", tray)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.tray = !tray);
+                        }))
+                        .into_any_element(),
+                    cx,
                 )
                 .into_any_element(),
                 row(
                     "Unload models",
-                "Frees the model's memory between sessions, on the graphics card or in RAM. The next session waits a moment while it loads.",
-                idle_picker.into_any_element(),
-                cx,
+                    "Frees memory between sessions. The next one starts a moment later.",
+                    idle_picker.into_any_element(),
+                    cx,
                 )
                 .into_any_element(),
             ],
@@ -560,16 +534,9 @@ impl Settings {
         let period = style.final_period;
         let laughter = style.join_laughter;
         let mut rows = vec![
-            row(
-                "Capitals",
-                "Lowercase starts keep names and acronyms as they are.",
-                capitals_picker.into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-            row(
+            setting("Capitals", capitals_picker.into_any_element(), cx).into_any_element(),
+            setting(
                 "Period at the end",
-                "Keep the period a model puts after each phrase.",
                 Switch::new("final-period", period)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.edit(cx, |config| config.style.final_period = !period);
@@ -578,9 +545,8 @@ impl Settings {
                 cx,
             )
             .into_any_element(),
-            row(
+            setting(
                 "Laughter as one word",
-                "Writes ха-ха-ха as хахаха and ha-ha as haha.",
                 Switch::new("join-laughter", laughter)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.edit(cx, |config| config.style.join_laughter = !laughter);
@@ -645,7 +611,7 @@ impl Settings {
                 .child(div().flex_none().child(add))
                 .into_any_element(),
         );
-        group("Writing style", rows, cx)
+        group(None, rows, cx)
     }
 
     /// Adds the replacement typed into the two fields and clears them.
@@ -697,27 +663,18 @@ impl Settings {
             None => "Measuring".to_string(),
         };
         group(
-            "Resources",
+            Some("Resources"),
             [
                 Some(row("Memory", memory_detail, value(memory), cx).into_any_element()),
                 weights.filter(|_| on_gpu).map(|bytes| {
-                    row(
+                    setting(
                         "Graphics memory",
-                        "About the size of the model's weights, while it is loaded.",
                         value(format!("about {}", chrome::size(bytes))),
                         cx,
                     )
                     .into_any_element()
                 }),
-                Some(
-                    row(
-                        "Processor",
-                        "Over the last second. Close to nothing between sessions.",
-                        value(cpu),
-                        cx,
-                    )
-                    .into_any_element(),
-                ),
+                Some(setting("Processor", value(cpu), cx).into_any_element()),
             ]
             .into_iter()
             .flatten()
@@ -756,11 +713,6 @@ impl Settings {
             .collect();
 
         let processor = config.processor;
-        let device = self.status.read(cx).device.clone();
-        let detail = match device {
-            Some(device) => format!("Running on {}.", device.name),
-            None => "The graphics card is used through Vulkan when there is one.".to_string(),
-        };
         let picker = Picker::new("processor", &self.popovers, processor.name())
             .width(Picker::REGULAR)
             .items(Processor::ALL.into_iter().map(|choice| {
@@ -773,8 +725,8 @@ impl Settings {
                     this.edit(cx, |config| config.processor = choice);
                 }))
             }));
-        rows.push(row("Run on", detail, picker.into_any_element(), cx).into_any_element());
-        group("Model", rows, cx)
+        rows.push(setting("Run on", picker.into_any_element(), cx).into_any_element());
+        group(None, rows, cx)
     }
 
     /// Search over Hugging Face for any model the engine can run. Results and a repository's
@@ -816,7 +768,7 @@ impl Settings {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().child(back))
+                .child(div().flex().child(back))
                 .child(
                     div()
                         .text_size(theme.text(Text::Large))
@@ -824,12 +776,7 @@ impl Settings {
                         .child(repo.clone()),
                 )
                 .when_some(found.as_ref(), |this, repository| {
-                    this.child(
-                        div()
-                            .text_size(theme.text(Text::Small))
-                            .text_color(theme.muted_foreground)
-                            .child(models::facts(repository)),
-                    )
+                    this.child(models::facts(repository, cx))
                 });
             let list = match files {
                 Some(files) => {
@@ -1115,23 +1062,11 @@ impl Render for Settings {
         let page = self.page;
         let heading = div()
             .flex_none()
-            .flex()
-            .flex_col()
-            .gap_1()
             .pt_6()
             .pb_4()
-            .child(
-                div()
-                    .text_size(theme.text(Text::Title))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(page.title()),
-            )
-            .child(
-                div()
-                    .text_size(theme.text(Text::Small))
-                    .text_color(theme.muted_foreground)
-                    .child(page.subtitle()),
-            );
+            .text_size(theme.text(Text::Title))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(page.title());
         let groups = self.page(&config, cx);
         // The search page lays out its own lists, which scroll themselves, so it fills the
         // height instead of sitting in the page scroller.
@@ -1149,7 +1084,6 @@ impl Render for Settings {
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(CONTENT))
                         .px_8()
                         .pb_8()
                         .flex()

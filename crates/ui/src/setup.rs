@@ -302,7 +302,7 @@ impl Setup {
             .flex_col()
             .gap_2()
             .child(intro(
-                "Pick the model to dictate with. It runs on this computer and nothing you say leaves it. Settings can find more on Hugging Face.",
+                "It runs on this computer, and nothing you say leaves it.",
                 cx,
             ))
             .children(listed.into_iter().map(|model| {
@@ -313,8 +313,9 @@ impl Setup {
                 let key = id.key();
                 let choose = cx.listener(move |this, _, _, cx| {
                     let key = key.clone();
-                    this.store
-                        .update(cx, |store, cx| store.update(|config| config.model = key, cx));
+                    this.store.update(cx, |store, cx| {
+                        store.update(|config| config.model = key, cx)
+                    });
                 });
                 div()
                     .rounded(chrome::GROUP_RADIUS)
@@ -372,10 +373,6 @@ impl Setup {
             .flex()
             .flex_col()
             .gap_4()
-            .child(intro(
-                "Pick the microphone to dictate with and say something to check the level.",
-                cx,
-            ))
             .child(
                 Picker::new("setup-device", &self.popovers, name)
                     .menu(device_menu("setup-device-menu", &self.device_scrollbar))
@@ -392,7 +389,7 @@ impl Setup {
             .flex_col()
             .gap_4()
             .child(intro(
-                "Press Start, speak a sentence or two, then press the check mark on the pill. Each phrase is typed into the field as you pause.",
+                "Press Start, speak, then press the check mark on the pill.",
                 cx,
             ))
             .child(self.field.clone())
@@ -412,7 +409,10 @@ impl Setup {
                 ),
             )
             .when(!window.is_window_active(), |this| {
-                this.child(intro("Keep this window focused so the text lands in the field.", cx))
+                this.child(intro(
+                    "Keep this window focused so the text lands in the field.",
+                    cx,
+                ))
             })
     }
 

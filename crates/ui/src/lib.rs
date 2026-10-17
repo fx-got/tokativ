@@ -18,6 +18,9 @@ pub use host::{Action, Files, Host, Library, ModelState, Status, Store, entities
 pub use pill::{Phase, Pill};
 pub use radius::nested_radius;
 
+/// The path the download icon is drawn from. Sonora's packs have none, so the app ships its own.
+pub const DOWNLOAD_ICON: &str = "tokativ/download.svg";
+
 /// Builds the theme from the desktop's light or dark preference. Called again before each
 /// window opens and whenever the preference changes, since the portal reports it some time
 /// after startup.

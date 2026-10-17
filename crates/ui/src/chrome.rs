@@ -138,32 +138,49 @@ pub const GROUP_RADIUS: Pixels = px(14.);
 /// How far a group's rows sit from its edges.
 pub const GROUP_PADDING: Pixels = px(16.);
 
-/// A labelled group of settings rows on a raised surface, with a hairline between rows.
-pub fn group(label: &str, rows: Vec<AnyElement>, cx: &App) -> impl IntoElement {
+/// A group of settings rows on a raised surface, with a hairline between rows. The label goes
+/// above it, and is left out where the page title already names the group.
+pub fn group(label: Option<&str>, rows: Vec<AnyElement>, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let count = rows.len();
-    div().child(section(label, cx)).child(
-        div()
-            .flex()
-            .flex_col()
-            .rounded(GROUP_RADIUS)
-            .bg(theme.secondary.opacity(0.45))
-            .border_1()
-            .border_color(theme.border.opacity(0.6))
-            .children(rows.into_iter().enumerate().map(move |(index, row)| {
-                div()
-                    .when(index + 1 < count, |this| {
-                        this.border_b_1().border_color(theme.border.opacity(0.5))
-                    })
-                    .child(row)
-            })),
-    )
+    div()
+        .when_some(label, |this, label| this.child(section(label, cx)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .rounded(GROUP_RADIUS)
+                .bg(theme.secondary.opacity(0.45))
+                .border_1()
+                .border_color(theme.border.opacity(0.6))
+                .children(rows.into_iter().enumerate().map(move |(index, row)| {
+                    div()
+                        .when(index + 1 < count, |this| {
+                            this.border_b_1().border_color(theme.border.opacity(0.5))
+                        })
+                        .child(row)
+                })),
+        )
 }
 
 /// A settings row: a title with a muted line under it on the left, the control on the right.
 pub fn row(
     title: &str,
     detail: impl Into<gpui::SharedString>,
+    action: AnyElement,
+    cx: &App,
+) -> impl IntoElement {
+    labeled(title, Some(detail.into()), action, cx)
+}
+
+/// A settings row whose title says all there is to say, with the control on the right.
+pub fn setting(title: &str, action: AnyElement, cx: &App) -> impl IntoElement {
+    labeled(title, None, action, cx)
+}
+
+fn labeled(
+    title: &str,
+    detail: Option<gpui::SharedString>,
     action: AnyElement,
     cx: &App,
 ) -> impl IntoElement {
@@ -189,13 +206,15 @@ pub fn row(
                         .text_ellipsis()
                         .child(title.to_owned()),
                 )
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_color(theme.muted_foreground)
-                        .text_size(theme.text(Text::Small))
-                        .child(detail.into()),
-                ),
+                .when_some(detail, |this, detail| {
+                    this.child(
+                        div()
+                            .min_w_0()
+                            .text_color(theme.muted_foreground)
+                            .text_size(theme.text(Text::Small))
+                            .child(detail),
+                    )
+                }),
         )
         .child(div().flex_none().child(action))
 }
