@@ -11,7 +11,7 @@ speak.
 [![Nix](https://img.shields.io/badge/nix-flake-2b2b33?style=flat-square&logo=nixos)](#nix)
 [![Platforms](https://img.shields.io/badge/linux-x86__64%20%7C%20aarch64-2b2b33?style=flat-square&logo=linux&logoColor=white)](#install)
 
-<img src="docs/preview.png" alt="The Tokativ pill while dictating" width="900">
+<img src="docs/preview-glow.png" alt="The Tokativ pill while dictating" width="900">
 <br>
 <br>
 
