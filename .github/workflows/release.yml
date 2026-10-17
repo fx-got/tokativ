@@ -60,6 +60,8 @@ jobs:
           spirv="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#spirv-headers)"
           # GGML_NATIVE would tune the CPU code to this runner and crash on older processors.
           echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DVulkan_GLSLC_EXECUTABLE=$glslc/bin/glslc -DVulkan_INCLUDE_DIR=$headers/include -DCMAKE_PREFIX_PATH=$spirv" >> "$GITHUB_ENV"
+          # ggml finds SPIRV-Headers through CMake but includes spirv.hpp without linking them.
+          echo "CPLUS_INCLUDE_PATH=$spirv/include" >> "$GITHUB_ENV"
 
       - name: rust toolchain
         run: rustup toolchain install
