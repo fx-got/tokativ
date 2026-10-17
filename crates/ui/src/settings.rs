@@ -1,15 +1,16 @@
 //! The settings window. Every control writes the config through [`Store`], and the daemon
 //! applies the change from there.
 
+use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Task, Window,
     WindowHandle, div, px,
 };
-use tokativ_config::{Backend, Config, PillEdge, Processor};
+use tokativ_config::{Backend, Capitals, Config, PillEdge, Processor};
 use tokativ_engine::ModelId;
 use ui::{
-    ActiveTheme as _, Input, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller,
+    ActiveTheme as _, Button, Input, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller,
     Scrubber, ScrubberState, Switch, Text,
 };
 
@@ -84,6 +85,8 @@ pub struct Settings {
     usage: Usage,
     _sampling: Task<()>,
     search_input: Entity<Input>,
+    replace_from: Entity<Input>,
+    replace_to: Entity<Input>,
     /// The query last sent, so a notify that did not change the text does not search again.
     searched: String,
     /// The search result whose files are listed.
@@ -122,6 +125,8 @@ impl Settings {
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             usage: Usage::default(),
             search_input,
+            replace_from: cx.new(|cx| Input::new("Heard as", cx)),
+            replace_to: cx.new(|cx| Input::new("Write as", cx)),
             searched: String::new(),
             opened: None,
             _debounce: None,
@@ -430,6 +435,133 @@ impl Settings {
         )
     }
 
+    /// The rules that rewrite each phrase before it is inserted.
+    fn style(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
+        let style = config.style.clone();
+        let capitals = style.capitals;
+        let capitals_picker = Picker::new("capitals", &self.popovers, capitals.name())
+            .width(Picker::REGULAR)
+            .items(Capitals::ALL.into_iter().map(|choice| {
+                MenuItem::new(
+                    SharedString::from(format!("capitals-{choice:?}")),
+                    choice.name(),
+                )
+                .selected(choice == capitals)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| config.style.capitals = choice);
+                }))
+            }));
+        let period = style.final_period;
+        let laughter = style.join_laughter;
+        let mut rows = vec![
+            row(
+                "Capitals",
+                "Lowercase starts keep names and acronyms as they are.",
+                capitals_picker.into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+            row(
+                "Period at the end",
+                "Keep the period a model puts after each phrase.",
+                Switch::new("final-period", period)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| config.style.final_period = !period);
+                    }))
+                    .into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+            row(
+                "Laughter as one word",
+                "Writes ха-ха-ха as хахаха and ha-ha as haha.",
+                Switch::new("join-laughter", laughter)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| config.style.join_laughter = !laughter);
+                    }))
+                    .into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+        ];
+        let theme = cx.theme();
+        rows.extend(
+            style
+                .replacements
+                .iter()
+                .enumerate()
+                .map(|(index, replacement)| {
+                    let remove =
+                        Button::new(SharedString::from(format!("remove-replacement-{index}")))
+                            .icon("icons/x.svg")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.edit(cx, |config| {
+                                    if index < config.style.replacements.len() {
+                                        config.style.replacements.remove(index);
+                                    }
+                                });
+                            }));
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px(chrome::GROUP_PADDING)
+                        .py_2()
+                        .child(div().flex_1().min_w_0().child(replacement.from.clone()))
+                        .child(
+                            gpui::svg()
+                                .path(icons::path("icons/chevron-right.svg"))
+                                .size(px(14.))
+                                .flex_none()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(div().flex_1().min_w_0().child(replacement.to.clone()))
+                        .child(div().flex_none().child(remove))
+                        .into_any_element()
+                }),
+        );
+        let add = Button::new("add-replacement")
+            .label("Add")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, window, cx| this.add_replacement(window, cx)));
+        rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(chrome::GROUP_PADDING)
+                .py_3()
+                .child(div().flex_1().min_w_0().child(self.replace_from.clone()))
+                .child(div().flex_1().min_w_0().child(self.replace_to.clone()))
+                .child(div().flex_none().child(add))
+                .into_any_element(),
+        );
+        group("Writing style", rows, cx)
+    }
+
+    /// Adds the replacement typed into the two fields and clears them.
+    fn add_replacement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let from = self.replace_from.read(cx).text().trim().to_owned();
+        let to = self.replace_to.read(cx).text().to_owned();
+        if from.is_empty() {
+            return;
+        }
+        self.edit(cx, |config| {
+            config
+                .style
+                .replacements
+                .push(tokativ_config::Replacement { from, to })
+        });
+        for field in [&self.replace_from, &self.replace_to] {
+            field.update(cx, |input, cx| input.set_text("", cx));
+        }
+        let focus = self.replace_from.focus_handle(cx);
+        focus.focus(window, cx);
+    }
+
     /// The daemon's own memory and processor use, refreshed every second.
     fn resources(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -636,6 +768,7 @@ impl Render for Settings {
                         .child(self.models(&config, cx))
                         .child(self.find(cx))
                         .child(self.dictation(&config, cx))
+                        .child(self.style(&config, cx))
                         .child(self.detection(&config, cx))
                         .child(self.insertion(&config, cx))
                         .child(self.pill(&config, cx))
