@@ -75,11 +75,54 @@ fn insert(keyboard: &mut Enigo, method: Method, text: &str) -> Result<()> {
     }
     match method {
         Method::Clipboard => paste(keyboard, text),
-        Method::VirtualKeyboard | Method::InputMethod => keyboard.text(text).or_else(|error| {
-            log::warn!("insert: typing failed, pasting instead: {error}");
-            paste(keyboard, text)
-        }),
+        Method::VirtualKeyboard | Method::InputMethod => {
+            type_text(keyboard, text).or_else(|error| {
+                log::warn!("insert: typing failed, pasting instead: {error:#}");
+                paste(keyboard, text)
+            })
+        }
     }
+}
+
+/// Types `text` as key events carrying it as Unicode, which works whatever the keyboard layout.
+#[cfg(not(target_os = "macos"))]
+fn type_text(keyboard: &mut Enigo, text: &str) -> Result<()> {
+    keyboard.text(text).context("typing")
+}
+
+/// Types `text` as key events carrying it as Unicode. enigo sends only the key-down half of each
+/// event, which many macOS apps drop, so this sends the key-up too.
+#[cfg(target_os = "macos")]
+fn type_text(_keyboard: &mut Enigo, text: &str) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    /// The most UTF-16 units one event carries. macOS cuts longer strings off.
+    const CHUNK: usize = 20;
+    /// A pause between chunks, so a busy app does not drop or reorder them.
+    const BETWEEN: Duration = Duration::from_millis(2);
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|()| anyhow!("cannot create a keyboard event source"))?;
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut start = 0;
+    while start < units.len() {
+        let mut end = (start + CHUNK).min(units.len());
+        // A surrogate pair split across two events would arrive as two broken characters.
+        if end < units.len() && (0xDC00..0xE000).contains(&units[end]) {
+            end -= 1;
+        }
+        for down in [true, false] {
+            let event = CGEvent::new_keyboard_event(source.clone(), 0, down)
+                .map_err(|()| anyhow!("cannot create a keyboard event"))?;
+            event.set_string_from_utf16_unchecked(&units[start..end]);
+            event.set_flags(CGEventFlags::CGEventFlagNull);
+            event.post(CGEventTapLocation::HID);
+        }
+        start = end;
+        thread::sleep(BETWEEN);
+    }
+    Ok(())
 }
 
 /// Offers `text` on the clipboard, presses the paste chord and then puts the old text back.

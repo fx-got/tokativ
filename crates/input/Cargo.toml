@@ -19,3 +19,6 @@ wl-clipboard-rs.workspace = true
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 arboard.workspace = true
 enigo.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics.workspace = true

@@ -63,6 +63,8 @@ winreg = "0.56"
 windows-sys = "0.61"
 # The pill's window handle on Windows, to keep clicks on it from taking focus.
 raw-window-handle = "0.6"
+# Typing on macOS, with a key-up after every key-down so every app takes the text.
+core-graphics = "0.25"
 # Keeps the daemon out of the Dock on macOS.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [

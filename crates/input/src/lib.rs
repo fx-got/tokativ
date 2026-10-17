@@ -68,7 +68,10 @@ pub(crate) type KeyHandler = Box<dyn Fn(Key) + Send>;
 
 #[cfg_attr(
     not(target_os = "linux"),
-    allow(dead_code, reason = "only the Wayland worker shows drafts and pastes per app")
+    allow(
+        dead_code,
+        reason = "only the Wayland worker shows drafts and pastes per app"
+    )
 )]
 pub(crate) enum Request {
     Begin,
