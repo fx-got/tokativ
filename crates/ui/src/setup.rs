@@ -4,8 +4,8 @@
 use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, Global, ScrollHandle, SharedString, Size, Window,
-    WindowHandle, div, px,
+    Animation, AnimationExt as _, App, ClipboardItem, Context, Entity, Global, ScrollHandle,
+    SharedString, Size, Window, WindowHandle, div, px, relative, svg,
 };
 use tokativ_audio::{InputDevice, Recorder};
 use tokativ_config::Model;
@@ -13,12 +13,15 @@ use ui::{
     ActiveTheme as _, Button, Input, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller, Text,
 };
 
-use crate::chrome::{self, meter, section};
+use crate::chrome::{self, meter};
 use crate::host::{Action, Host, Library, ModelState, Status, Store};
 use crate::settings::{NIRI_BIND, device_menu, model_row};
 
 const WIDTH: f32 = 600.;
 const HEIGHT: f32 = 560.;
+/// The height of a step segment and how long the newest one takes to fill.
+const SEGMENT: gpui::Pixels = px(6.);
+const FILL: std::time::Duration = std::time::Duration::from_millis(420);
 
 struct Open(WindowHandle<Setup>);
 
@@ -60,6 +63,25 @@ impl Step {
             Self::Microphone => "Microphone",
             Self::Try => "Try it",
             Self::Hotkey => "Hotkey",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Models => "icons/library-big.svg",
+            Self::Microphone => "icons/mic-vocal.svg",
+            Self::Try => "icons/text-select.svg",
+            Self::Hotkey => "icons/sliders-horizontal.svg",
+        }
+    }
+
+    /// One line on what the step asks for.
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Models => "Choose the speech model to dictate with",
+            Self::Microphone => "Choose what to listen to and check the level",
+            Self::Try => "Dictate a sentence into the field below",
+            Self::Hotkey => "Bind a key to start and finish dictating",
         }
     }
 
@@ -329,29 +351,76 @@ fn intro(text: &'static str, cx: &App) -> impl IntoElement {
         .child(text)
 }
 
+/// The step header: the step's icon, name and number, and a bar of one segment per step. The
+/// segment of the step just reached fills in as it appears.
+fn progress(step: Step, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let index = step.index();
+    let count = Step::ALL.len();
+    let segments = Step::ALL.into_iter().map(move |each| {
+        let reached = each.index() <= index;
+        let fill = move || div().h_full().rounded_full().bg(theme.progress_bar);
+        div()
+            .flex_1()
+            .h(SEGMENT)
+            .rounded_full()
+            .bg(theme.muted)
+            .overflow_hidden()
+            .when(reached && each != step, |this| this.child(fill().w_full()))
+            .when(each == step, |this| {
+                this.child(fill().with_animation(
+                    SharedString::from(format!("segment-{}", each.index())),
+                    Animation::new(FILL).with_easing(ui::ease_out_cubic),
+                    |fill, delta| fill.w(relative(delta)),
+                ))
+            })
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p(chrome::GROUP_PADDING)
+        .rounded(chrome::GROUP_RADIUS)
+        .bg(theme.secondary.opacity(0.45))
+        .border_1()
+        .border_color(theme.border.opacity(0.6))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(icons::path(step.icon()))
+                        .size(px(16.))
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(step.title()),
+                )
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{}/{count}", index + 1)),
+                ),
+        )
+        .child(
+            div()
+                .text_size(theme.text(Text::Small))
+                .text_color(theme.muted_foreground)
+                .child(step.summary()),
+        )
+        .child(div().flex().gap_1().children(segments))
+}
+
 impl Render for Setup {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let step = self.step;
         let index = step.index();
         let last = index == Step::ALL.len() - 1;
-        let steps = div()
-            .flex()
-            .gap_4()
-            .children(Step::ALL.into_iter().map(|each| {
-                let current = each == step;
-                div()
-                    .text_size(theme.text(Text::Small))
-                    .font_weight(match current {
-                        true => gpui::FontWeight::SEMIBOLD,
-                        false => gpui::FontWeight::NORMAL,
-                    })
-                    .text_color(match current {
-                        true => theme.foreground,
-                        false => theme.muted_foreground,
-                    })
-                    .child(format!("{}. {}", each.index() + 1, each.title()))
-            }));
 
         let body = match step {
             Step::Models => self.models(cx).into_any_element(),
@@ -398,8 +467,8 @@ impl Render for Setup {
             .px_6()
             .pb_6()
             .gap_4()
-            .child(section(step.title(), cx))
-            .child(steps)
+            .pt_4()
+            .child(progress(step, cx))
             .child(
                 div()
                     .flex()
