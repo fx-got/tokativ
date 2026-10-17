@@ -76,14 +76,15 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Opens the device and starts recording. Returns once the stream is running, or with the
-    /// reason it could not be opened.
+    /// Opens the device and starts recording into `levels`, which the caller may already be
+    /// drawing. Returns once the stream is running, or with the reason it could not be opened.
+    /// Opening a device can take a while, so callers on a UI thread run this in the background.
     pub fn start(
         options: Options,
         detector: Option<Box<dyn SpeechDetector>>,
+        levels: Levels,
         events: impl FnMut(Event) + Send + 'static,
     ) -> Result<Self> {
-        let levels = Levels::default();
         let (control, commands) = mpsc::sync_channel(4);
         let (opened, opening) = mpsc::sync_channel(1);
         let published = levels.clone();

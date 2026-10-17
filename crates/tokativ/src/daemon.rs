@@ -8,7 +8,7 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, KeyBinding, QuitMode, WindowHandle};
 use notify::{RecursiveMode, Watcher as _};
-use tokativ_audio::{Options, Recorder, Silero, SpeechDetector, Timing};
+use tokativ_audio::{Levels, Options, Recorder, Silero, SpeechDetector, Timing};
 use tokativ_config::{Config, Model, config_dir, config_path, socket_path};
 use tokativ_engine::{Joiner, Transcriber};
 use tokativ_input::{Inserter, Key, Method};
@@ -45,12 +45,25 @@ enum Event {
     ConfigFile,
 }
 
+/// The pill window and where it was put, which decides whether the next session can reuse it.
+struct Placed {
+    handle: WindowHandle<Pill>,
+    output: Option<String>,
+    pill: tokativ_config::Pill,
+}
+
+impl Placed {
+    fn fits(&self, output: &Option<String>, config: &Config) -> bool {
+        &self.output == output && self.pill == config.pill
+    }
+}
+
 /// One press of the hotkey to the pill closing.
 struct Session {
     id: u64,
     engine: Model,
+    /// The microphone, once it has opened.
     recorder: Option<Recorder>,
-    pill: Option<WindowHandle<Pill>>,
     /// Created at the first insertion, once the input method may have reported the text
     /// already left of the cursor.
     joiner: Option<Joiner>,
@@ -67,6 +80,8 @@ struct Session {
     capturing: bool,
     /// Confirm was pressed, so the session ends once the last segment is inserted.
     stopping: bool,
+    /// The hotkey was pressed again while finishing, so a new session follows in the same pill.
+    restart: bool,
 }
 
 pub struct Daemon {
@@ -79,6 +94,9 @@ pub struct Daemon {
     inserter: Option<Inserter>,
     session: Option<Session>,
     next_session: u64,
+    /// The pill window, kept while it is on screen so a new session can unfold it again
+    /// instead of opening another.
+    pill: Option<Placed>,
     tray: Option<Tray>,
     tray_events: UnboundedSender<TrayEvent>,
     _watcher: Option<notify::RecommendedWatcher>,
@@ -162,6 +180,7 @@ impl Daemon {
                 inserter,
                 session: None,
                 next_session: 0,
+                pill: None,
                 tray: None,
                 tray_events,
                 _watcher: watcher,
@@ -192,6 +211,13 @@ impl Daemon {
             },
             cx,
         );
+
+        // The pill waits folded from the start, so even the first session shows it at once.
+        daemon.update(cx, |daemon, cx| {
+            let config = daemon.store.read(cx).config().clone();
+            let output = tokativ_input::focused_output();
+            daemon.pill = daemon.open_pill(Levels::default(), &config, output, true, cx);
+        });
 
         let first_run = !config_path().exists() || !library.read(cx).any_installed();
         if first_run {
@@ -248,14 +274,27 @@ impl Daemon {
         }
     }
 
+    /// Starts a session, confirms the one running, or, while one is finishing, asks for a new
+    /// one to follow it so the pill goes straight back to listening.
     fn toggle(&mut self, cx: &mut Context<Self>) {
-        match &self.session {
+        match &mut self.session {
             None => self.start(cx),
             Some(session) if !session.stopping => self.confirm(cx),
-            Some(_) => log::info!("session: still finishing the last one"),
+            Some(session) => {
+                session.restart = !session.restart;
+                let phase = match session.restart {
+                    true => Phase::Listening,
+                    false => Phase::Processing,
+                };
+                if let Some(pill) = self.pill.as_ref().map(|placed| placed.handle) {
+                    set_phase(pill, phase, cx);
+                }
+            }
         }
     }
 
+    /// Shows the pill at once and opens the microphone in the background, since a device can
+    /// take a few hundred milliseconds to open. Speech before it opens is not heard.
     fn start(&mut self, cx: &mut Context<Self>) {
         if self.session.is_some() {
             return;
@@ -270,52 +309,9 @@ impl Daemon {
 
         self.next_session += 1;
         let id = self.next_session;
+        let levels = Levels::default();
+        self.show_pill(levels.clone(), &config, cx);
         self.transcriber.preload(engine);
-        tokativ_ui::refresh_theme(cx);
-
-        // Drafts show as preedit text, which only the input method can put at the cursor.
-        let drafts = config.live_preview
-            && self
-                .inserter
-                .as_ref()
-                .is_some_and(|inserter| inserter.status().method == Method::InputMethod);
-        let recorder = Silero::new().and_then(|silero| {
-            let events = self.events.clone();
-            Recorder::start(
-                Options {
-                    device: config.input_device.clone(),
-                    timing: Timing {
-                        threshold: config.vad.threshold,
-                        silence_ms: config.vad.silence_ms,
-                        max_segment_s: config.vad.max_segment_s,
-                        preroll_ms: config.vad.preroll_ms,
-                    },
-                    progress: drafts.then_some(DRAFT_EVERY),
-                },
-                Some(Box::new(silero) as Box<dyn SpeechDetector>),
-                move |event| {
-                    events
-                        .unbounded_send(Event::Recorder { session: id, event })
-                        .ok();
-                },
-            )
-        });
-        let levels = recorder
-            .as_ref()
-            .map(|recorder| recorder.levels().clone())
-            .unwrap_or_default();
-        let pill = self.open_pill(levels, &config, cx);
-
-        let recorder = match recorder {
-            Ok(recorder) => recorder,
-            Err(error) => {
-                log::error!("session: cannot record: {error:#}");
-                if let Some(pill) = pill {
-                    set_phase(pill, Phase::Error, cx);
-                }
-                return;
-            }
-        };
         if let Some(inserter) = &self.inserter {
             inserter.begin();
         }
@@ -323,8 +319,7 @@ impl Daemon {
         self.session = Some(Session {
             id,
             engine,
-            recorder: Some(recorder),
-            pill,
+            recorder: None,
             joiner: None,
             pending: 0,
             spoken: 0,
@@ -332,16 +327,107 @@ impl Daemon {
             draft: None,
             capturing: true,
             stopping: false,
+            restart: false,
         });
         self.publish(cx);
+
+        // Drafts show as preedit text, which only the input method can put at the cursor.
+        let drafts = config.live_preview
+            && self
+                .inserter
+                .as_ref()
+                .is_some_and(|inserter| inserter.status().method == Method::InputMethod);
+        let options = Options {
+            device: config.input_device.clone(),
+            timing: Timing {
+                threshold: config.vad.threshold,
+                silence_ms: config.vad.silence_ms,
+                max_segment_s: config.vad.max_segment_s,
+                preroll_ms: config.vad.preroll_ms,
+            },
+            progress: drafts.then_some(DRAFT_EVERY),
+        };
+        let events = self.events.clone();
+        let opening = cx.background_spawn(async move {
+            let silero = Silero::new()?;
+            Recorder::start(
+                options,
+                Some(Box::new(silero) as Box<dyn SpeechDetector>),
+                levels,
+                move |event| {
+                    events
+                        .unbounded_send(Event::Recorder { session: id, event })
+                        .ok();
+                },
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let opened = opening.await;
+            this.update(cx, |daemon, cx| daemon.opened(id, opened, cx))
+                .ok();
+        })
+        .detach();
     }
 
+    /// Takes the microphone a session asked for. A session that was confirmed meanwhile stops it
+    /// at once, and one that was cancelled drops it.
+    fn opened(&mut self, id: u64, opened: Result<Recorder>, cx: &mut Context<Self>) {
+        let session = self.session.as_mut().filter(|session| session.id == id);
+        match (session, opened) {
+            (Some(session), Ok(recorder)) => match session.stopping {
+                true => recorder.stop(),
+                false => session.recorder = Some(recorder),
+            },
+            (Some(_), Err(error)) => {
+                log::error!("session {id}: cannot record: {error:#}");
+                if let Some(pill) = self.pill.as_ref().map(|placed| placed.handle) {
+                    set_phase(pill, Phase::Error, cx);
+                }
+                let session = self.session.take().expect("session checked above");
+                self.close(session, false, cx);
+            }
+            (None, Ok(recorder)) => recorder.cancel(),
+            (None, Err(_)) => {}
+        }
+    }
+
+    /// Unfolds the waiting pill, or opens a new one when there is none or it sits on another
+    /// output or at another place than the config now asks for.
+    fn show_pill(&mut self, levels: Levels, config: &Config, cx: &mut Context<Self>) {
+        // The pill outlives sessions, so it picks up a light or dark switch here. The portal also
+        // answers late at login, after the waiting pill was first drawn.
+        tokativ_ui::refresh_theme(cx);
+        let output = tokativ_input::focused_output();
+        if let Some(placed) = &self.pill
+            && placed.fits(&output, config)
+        {
+            let reopened = placed.handle.update(cx, |pill, window, cx| {
+                pill.reopen(levels.clone(), window, cx)
+            });
+            if reopened.is_ok() {
+                return;
+            }
+        }
+        self.pill = self.open_pill(levels, config, output, false, cx);
+    }
+
+    /// Opens a pill window, replacing any there was. `resting` opens it folded away.
     fn open_pill(
-        &self,
-        levels: tokativ_audio::Levels,
+        &mut self,
+        levels: Levels,
         config: &Config,
+        output: Option<String>,
+        resting: bool,
         cx: &mut Context<Self>,
-    ) -> Option<WindowHandle<Pill>> {
+    ) -> Option<Placed> {
+        if let Some(old) = self.pill.take() {
+            cx.defer(move |cx| {
+                old.handle
+                    .update(cx, |_, window, _| window.remove_window())
+                    .ok();
+            });
+        }
+        tokativ_ui::refresh_theme(cx);
         let confirm = cx.entity().downgrade();
         let cancel = confirm.clone();
         let opened = tokativ_ui::pill::open(
@@ -354,11 +440,20 @@ impl Daemon {
             move |cx| {
                 cancel.update(cx, |daemon, cx| daemon.cancel(cx)).ok();
             },
+            resting,
             cx,
         );
-        opened
-            .map_err(|error| log::error!("session: cannot show the pill: {error:#}"))
-            .ok()
+        match opened {
+            Ok(handle) => Some(Placed {
+                handle,
+                output,
+                pill: config.pill.clone(),
+            }),
+            Err(error) => {
+                log::error!("session: cannot show the pill: {error:#}");
+                None
+            }
+        }
     }
 
     fn confirm(&mut self, cx: &mut Context<Self>) {
@@ -372,7 +467,7 @@ impl Daemon {
         if let Some(recorder) = session.recorder.take() {
             recorder.stop();
         }
-        if let Some(pill) = session.pill {
+        if let Some(pill) = self.pill.as_ref().map(|placed| placed.handle) {
             set_phase(pill, Phase::Processing, cx);
         }
         log::info!("session {}: confirmed", session.id);
@@ -387,7 +482,7 @@ impl Daemon {
             recorder.cancel();
         }
         log::info!("session {}: cancelled", session.id);
-        self.close(session, cx);
+        self.close(session, true, cx);
     }
 
     fn recorded(&mut self, id: u64, event: tokativ_audio::Event, cx: &mut Context<Self>) {
@@ -442,11 +537,11 @@ impl Daemon {
             }
             tokativ_audio::Event::Failed(error) => {
                 log::error!("session {id}: capture failed: {error}");
-                if let Some(pill) = session.pill.take() {
+                if let Some(pill) = self.pill.as_ref().map(|placed| placed.handle) {
                     set_phase(pill, Phase::Error, cx);
                 }
                 let session = self.session.take().expect("session checked above");
-                self.close(session, cx);
+                self.close(session, false, cx);
             }
             tokativ_audio::Event::Finished => {
                 session.capturing = false;
@@ -520,18 +615,26 @@ impl Daemon {
             .session
             .as_ref()
             .is_some_and(|session| session.stopping && !session.capturing && session.pending == 0);
-        if done {
-            let session = self.session.take().expect("session checked above");
-            log::info!("session {}: done", session.id);
-            self.close(session, cx);
+        if !done {
+            return;
+        }
+        let session = self.session.take().expect("session checked above");
+        log::info!("session {}: done", session.id);
+        let restart = session.restart;
+        self.close(session, !restart, cx);
+        if restart {
+            self.start(cx);
         }
     }
 
-    fn close(&mut self, session: Session, cx: &mut Context<Self>) {
+    /// Ends a session's text insertion and, with `dismiss`, folds the pill away. A pill that
+    /// shows an error or goes on to the next session stays.
+    fn close(&mut self, session: Session, dismiss: bool, cx: &mut Context<Self>) {
+        drop(session);
         if let Some(inserter) = &self.inserter {
             inserter.end();
         }
-        if let Some(pill) = session.pill {
+        if dismiss && let Some(pill) = self.pill.as_ref().map(|placed| placed.handle) {
             cx.defer(move |cx| {
                 pill.update(cx, |pill, _, cx| pill.dismiss(cx)).ok();
             });

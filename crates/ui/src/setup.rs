@@ -138,6 +138,7 @@ impl Setup {
                 progress: None,
             },
             None,
+            tokativ_audio::Levels::default(),
             |_| {},
         ) {
             Ok(recorder) => self.monitor = Some(recorder),

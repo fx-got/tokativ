@@ -60,11 +60,25 @@ const BARS_STAGGER: Duration = Duration::from_millis(24);
 const BAR_REVEAL: Duration = Duration::from_millis(200);
 /// How fast the bars go out when the pill closes, before the capsule folds.
 const BARS_FADE: Duration = Duration::from_millis(90);
+/// How close to its target, and how slow, a spring must be to count as at rest. Fine enough that
+/// landing on the exact target moves nothing by a visible fraction of a pixel.
+const REST: f32 = 0.001;
+/// How much of the spring's overshoot past full width shows as growth in scale, once the
+/// capsule has reached its full width.
+const OVERSHOOT_SCALE: f32 = 0.5;
 /// The longest a close may take before the window goes regardless.
 const CLOSE_LIMIT: Duration = Duration::from_millis(700);
 /// How small and how blurred the capsule is when folded.
 const FOLDED_SCALE: f32 = 0.82;
 const FOLDED_BLUR: Pixels = px(8.);
+/// Where the pill takes clicks: the capsule at full width, not the room around it for the shadow.
+const REGION: Bounds<Pixels> = Bounds {
+    origin: point(SHADOW, SHADOW),
+    size: Size {
+        width: WIDTH,
+        height: HEIGHT,
+    },
+};
 
 /// What the session is doing, which is what the bars show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,8 +107,14 @@ pub struct Pill {
     body: Spring,
     /// How far the buttons have popped in.
     controls: Spring,
-    /// The window removal is already queued.
-    removed: bool,
+    /// The pill has folded away and waits, invisible and click-through, for the next session.
+    /// Keeping the surface instead of closing it lets the next session show its first frame at
+    /// once, where a new layer surface takes over a hundred milliseconds to appear.
+    resting: bool,
+    /// The capsule has reached its full width since it last started to open. From then on its
+    /// width holds and the spring's bounce shows as scale, which moves by fractions of a pixel
+    /// where the width can only step by whole ones.
+    widened: bool,
 }
 
 /// One animated value driven by a spring towards its target.
@@ -140,18 +160,19 @@ impl Spring {
     }
 
     fn settled(&self) -> bool {
-        self.config.is_settled(self.state, self.target, 0.01)
+        self.config.is_settled(self.state, self.target, REST)
     }
 }
 
 /// Opens the pill on the focused output. `levels` feeds the bars, and the handlers run when
-/// the buttons are clicked.
+/// the buttons are clicked. A `resting` pill starts folded away, ready to unfold at once.
 pub fn open(
     levels: Levels,
     edge: PillEdge,
     margin: f32,
     on_confirm: impl Fn(&mut App) + 'static,
     on_cancel: impl Fn(&mut App) + 'static,
+    resting: bool,
     cx: &mut App,
 ) -> anyhow::Result<WindowHandle<Pill>> {
     let size = Size::new(WIDTH + SHADOW * 2., HEIGHT + SHADOW * 2.);
@@ -187,10 +208,10 @@ pub fn open(
             ..Default::default()
         },
         move |window, cx| {
-            window.set_input_region(Some(&[Bounds {
-                origin: point(SHADOW, SHADOW),
-                size: Size::new(WIDTH, HEIGHT),
-            }]));
+            window.set_input_region(Some(match resting {
+                true => &[],
+                false => &[REGION],
+            }));
             cx.new(|_| Pill {
                 levels,
                 phase: Phase::Listening,
@@ -203,7 +224,8 @@ pub fn open(
                 closing: None,
                 body: Spring::new(OPEN),
                 controls: Spring::new(POP),
-                removed: false,
+                resting,
+                widened: false,
             })
         },
     )
@@ -226,7 +248,25 @@ impl Pill {
         cx.notify();
     }
 
-    /// Folds the pill away and closes its window once the motion has finished.
+    /// Unfolds the pill again for a new session, from wherever its folding has got to, so a
+    /// quick second press turns the motion around instead of starting over.
+    pub fn reopen(&mut self, levels: Levels, window: &mut Window, cx: &mut Context<Self>) {
+        let folded = self.closing.take().is_some() || self.resting;
+        if self.resting {
+            self.resting = false;
+            window.set_input_region(Some(&[REGION]));
+        }
+        self.levels = levels;
+        self.phase = Phase::Listening;
+        self.since = Instant::now();
+        if folded {
+            self.opened = Instant::now();
+            self.widened = false;
+        }
+        cx.notify();
+    }
+
+    /// Folds the pill away. Once folded it rests, invisible, until [`Pill::reopen`].
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         if self.closing.is_none() {
             self.closing = Some(Instant::now());
@@ -240,9 +280,9 @@ impl Pill {
     fn animate(&mut self, elapsed: Duration, still: bool) -> bool {
         match self.closing {
             None => {
-                self.body.target = 1.;
+                self.body.aim(1., OPEN);
                 if self.opened.elapsed() >= CONTROLS_DELAY {
-                    self.controls.target = 1.;
+                    self.controls.aim(1., POP);
                 }
             }
             Some(closing) if closing.elapsed() < BARS_FADE => {
@@ -318,11 +358,16 @@ impl Pill {
 
 impl Render for Pill {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.resting {
+            return div().size_full();
+        }
         let elapsed = self.step();
-        if !self.animate(elapsed, cx.reduce_motion()) && !self.removed {
-            // This only marks the window, GPUI closes it once the frame is done.
-            self.removed = true;
-            window.remove_window();
+        if !self.animate(elapsed, cx.reduce_motion()) {
+            // Folded: clear the surface, stop taking clicks and stop asking for frames.
+            self.resting = true;
+            self.beat = None;
+            window.set_input_region(Some(&[]));
+            return div().size_full();
         }
         window.request_animation_frame();
 
@@ -345,8 +390,15 @@ impl Render for Pill {
         // overshoots a little, so it lands slightly wide and settles back.
         let body = self.body.at().max(0.);
         let unfolded = body.min(1.);
-        let width = ui::snapped(HEIGHT + (WIDTH - HEIGHT) * body, window);
-        let scale = FOLDED_SCALE + (1. - FOLDED_SCALE) * body;
+        let opening = self.closing.is_none();
+        if opening && body >= 1. {
+            self.widened = true;
+        }
+        let (spread, scale) = match opening && self.widened {
+            true => (1., 1. + (body - 1.) * OVERSHOOT_SCALE),
+            false => (unfolded, FOLDED_SCALE + (1. - FOLDED_SCALE) * body),
+        };
+        let width = ui::snapped(HEIGHT + (WIDTH - HEIGHT) * spread, window);
         let controls = self.controls.at().max(0.);
         let pop = (0.4 + 0.6 * controls).max(0.01);
         let control_opacity = controls.min(1.);

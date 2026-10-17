@@ -14,7 +14,7 @@ use std::thread;
 use anyhow::{Context as _, Result, anyhow};
 pub use tokativ_config::Backend;
 
-pub use focus::{focused_app_id, other_input_method};
+pub use focus::{focused_app_id, focused_output, other_input_method};
 
 /// The way text actually reaches apps, after the startup probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
